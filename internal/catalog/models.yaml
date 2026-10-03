@@ -1,0 +1,58 @@
+models:
+  - name: deepseek-v4-flash
+    description: Fastest and cheapest model, good for quick lookups, simple edits and boilerplate
+    strengths: speed and cost; short answers, simple file edits, formatting, running routine tool steps
+    input_price_per_m: 0.30
+    output_price_per_m: 1.20
+    tps_estimate: 120
+    context_window: 128000
+    tags: [fast, cheap, simple]
+  - name: deepseek-v4.1-flash
+    description: Newer flash generation, slightly better quality than v4-flash at similar cost
+    strengths: fast routine coding steps, quick explanations, light refactors
+    input_price_per_m: 0.30
+    output_price_per_m: 1.50
+    tps_estimate: 100
+    context_window: 128000
+    tags: [fast, cheap]
+  - name: deepseek-v4-pro
+    description: DeepSeek flagship with strong reasoning, competitive price
+    strengths: complex debugging, algorithmic work, multi-file reasoning
+    input_price_per_m: 2.50
+    output_price_per_m: 10.00
+    tps_estimate: 60
+    context_window: 128000
+    tags: [reasoning, code]
+  - name: glm-5.1
+    description: Previous-generation GLM, reliable generalist at low price
+    strengths: general coding help, documentation, straightforward tasks
+    input_price_per_m: 0.50
+    output_price_per_m: 2.00
+    tps_estimate: 80
+    context_window: 200000
+    tags: [cheap, general]
+  - name: glm-5.2
+    description: Balanced mid-tier GLM, good quality per dollar
+    strengths: everyday feature work, tests, moderate refactors
+    input_price_per_m: 1.00
+    output_price_per_m: 4.00
+    tps_estimate: 70
+    context_window: 200000
+    tags: [balanced]
+  - name: glm-5.3
+    description: Strongest GLM generation, best for hard problems
+    strengths: architecture, complex refactors, tricky bugs, long-context work
+    input_price_per_m: 2.00
+    output_price_per_m: 8.00
+    tps_estimate: 50
+    context_window: 200000
+    tags: [quality, reasoning, long-context]
+  - name: us.anthropic.claude-opus-4-7
+    description: Claude Opus 4.7, top-tier quality at premium price
+    strengths: hardest reasoning, long agentic tasks, nuanced code review
+    input_price_per_m: 15.00
+    output_price_per_m: 75.00
+    tps_estimate: 30
+    context_window: 200000
+    tags: [quality, reasoning, premium]
+default_model: glm-5.2
