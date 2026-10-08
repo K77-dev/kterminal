@@ -2,43 +2,74 @@
 
 Guia para agentes de IA ao trabalhar com o código deste repositório — plataforma OpenAI Codex CLI.
 
-Este projeto é o **kspec** — um kit de especificações e padrões para projetos desenvolvidos com agentes de IA. Contém skills, agents, rules e templates para Claude Code, OpenAI Codex CLI e Cursor. **Não contém código de aplicação executável.**
+Este projeto é o **kterminal** — um coding agent de terminal (TUI agêntica) em Go, no estilo Claude Code/opencode. O diferencial: o roteador externo **Jev** (Typesafe) escolhe o LLM a cada chamada, pesando qualidade, custo e tokens/s reais medidos. O desenvolvimento do próprio kterminal segue o fluxo SDD do **kspec** (dogfooding).
 
 > Para Claude Code, consulte `CLAUDE.md`. Para Cursor, consulte `CURSOR.md`.
 
 ## Visão Geral
 
-O kspec padroniza o ciclo de vida de desenvolvimento com agentes de IA: da ideia à especificação, das tasks ao código revisado. O source of truth de todo o conteúdo (skills, agents, rules, templates) vive em `.agents/`. As plataformas Claude Code (`.claude/`), Codex CLI (`.codex/`) e Cursor (`.cursor/`) apontam para `.agents/` via symlinks e artefatos derivados.
+- **Linguagem**: Go 1.27, módulo `kterminal`, binário único auto-contido
+- **TUI**: Charmbracelet (Bubble Tea, Lipgloss, Glamour, bubbles)
+- **LLM**: cliente HTTP próprio, OpenAI-compatible, streaming
+- **Roteamento**: Jev (Typesafe systemone, `api.typesafe.ai/v1/systemone`) com fallback heurístico
+- **Config**: TOML (BurntSushi), XDG (`~/.config/kterminal/config.toml`)
 
 ## Estrutura do projeto
 
 ```
-/                                # Raiz do kspec
-├── .agents/                     # Skills, agents, rules, templates (source of truth)
-│   ├── skills/                  # Skills invocáveis
-│   ├── agents/                  # Agents para automação
-│   ├── rules/                   # Padrões por tecnologia
-│   └── templates/               # Templates para artefatos
-├── .claude/                     # Espelhos de .agents/ (symlinks) — Claude Code
-├── .codex/                      # Espelhos de .agents/ (symlinks) — Codex CLI
-│   ├── skills/                  # → .agents/skills/ (symlinks)
-│   └── agents/                  # Arquivos .toml gerados (formato Codex)
-├── .cursor/                     # Discovery para Cursor
-│   ├── skills/                  # → .agents/skills/ (symlinks)
-│   ├── agents/                  # → .agents/agents/ (symlinks)
-│   ├── templates/               # → .agents/templates/ (symlink)
-│   └── rules/                   # *.mdc derivados de .agents/rules/*.md
-├── .github/                     # GitHub Actions, instructions
-├── spec/
-│   └── tasks/                   # Artefatos gerados (PRDs, techspecs, tasks, reviews)
-├── src/                         # Código-fonte principal
-├── dist/                        # Build output
-├── AGENTS.md                    # Este arquivo — guia para Codex CLI
+/                                # Raiz do kterminal
+├── main.go                      # Entry point: flags, wiring, --doctor
+├── main_test.go
+├── internal/
+│   ├── agent/                   # Loop agêntico, eventos, subagentes, compactação
+│   ├── catalog/                 # Catálogo de modelos embutido (go:embed models.yaml)
+│   ├── config/                  # Config TOML do usuário (XDG)
+│   ├── jev/                     # Cliente do roteador Jev (Typesafe)
+│   ├── llm/                     # Cliente OpenAI-compatible com streaming
+│   ├── router/                  # Interface Router, JevRouter, HeuristicRouter
+│   ├── session/                 # Transcripts JSONL + snapshots para resume
+│   ├── telemetry/               # Store de TPS medido por modelo
+│   ├── tools/                   # Registry + tools fs/bash/diff/diagnostics
+│   └── tui/                     # TUI Bubble Tea, menções, tema, estilos
+├── .docs/                       # Briefs de features (01-10)
+├── spec/tasks/                  # Artefatos SDD (PRDs, techspecs, tasks, reviews)
+├── .agents/                     # kspec: skills, agents, rules, templates (source of truth)
+├── .claude/ .codex/ .cursor/    # Camadas de discovery do kspec (symlinks/derivados)
 ├── CLAUDE.md                    # Guia equivalente para Claude Code
 ├── CURSOR.md                    # Guia equivalente para Cursor
-├── README.md                    # Documentação pública do projeto
-└── VERSION                      # Versão do kspec
+├── skills-lock.json             # Lockfile de skills de terceiros (mattpocock/skills)
+├── go.mod / go.sum
+└── kterminal                    # Binário compilado (não versionado)
 ```
+
+## Comandos do projeto
+
+```bash
+go build ./...                 # Build
+go run .                       # Rodar em desenvolvimento
+go vet ./...                   # Análise estática
+gofmt -l .                     # Formatação (não deve listar nenhum arquivo)
+go test ./...                  # Testes
+```
+
+Verificação completa: `go build ./... && go vet ./... && gofmt -l . && go test ./...`
+
+## Idioma
+
+- **Código-fonte**: inglês (identificadores, mensagens de erro, textos da TUI)
+- **Specs e documentação de projeto** (briefs `.docs/`, PRD, tech spec, tasks, reviews): português (Brasil)
+
+## Fluxo SDD (dogfooding)
+
+Toda feature nova do kterminal segue o fluxo kspec:
+
+1. Brief da feature em `.docs/NN-<slug>.md` (Contexto / Objetivo / Especificação / Critérios de aceitação / Verificação / Restrições)
+2. Skill `kspec-prd` → `spec/tasks/NNN-prd-<slug>/prd.md`
+3. Skill `kspec-techspec` → `techspec.md`
+4. Skill `kspec-tasks` → `tasks.md` + `N_task.md`
+5. Skill `kspec-implement` → implementação sequencial com review por task
+
+As features 001–010 foram implementadas assim.
 
 ## Skills Disponíveis
 
@@ -52,9 +83,9 @@ Para invocar uma skill no Codex CLI, use `$kspec-<nome>` ou descreva a ação em
 | `kspec-tasks` | `$kspec-tasks` ou "quebre em tasks..." | Quebra Tech Spec em tarefas incrementais |
 | `kspec-implement` | `$kspec-implement` ou "implemente as tasks de..." | Executa todas as tasks pendentes |
 | `kspec-qa` | `$kspec-qa` ou "execute QA de..." | Quality Assurance (E2E, acessibilidade) |
-| `kspec-pr-review` | `$kspec-pr-review` ou "revisão semântica da entrega antes do PR" | Alinhamento PRD/Tech Spec/tasks × diff, relatório e corpo do PR |
+| `kspec-pr-review` | `$kspec-pr-review` ou "revisão semântica da entrega" | Alinhamento spec × implementação e corpo do PR |
 | `kspec-bugfix` | `$kspec-bugfix` ou "corrija o bug documentado em..." | Corrige bugs documentados pelo QA |
-| `kspec-bootstrap` | `$kspec-bootstrap` ou "configure o kspec neste projeto" | Gera configuração para projeto existente |
+| `kspec-bootstrap` | `$kspec-bootstrap` ou "configure o kspec neste projeto" | Gera configuração kspec para projeto existente |
 | `kspec-version` | `$kspec-version` ou "qual a versão do kspec?" | Exibe versão atual e lista skills/agents |
 
 ## Agents
@@ -67,48 +98,28 @@ Os agents são acionados automaticamente pelas skills. No Codex CLI, os agents s
 | `kspec-review-runner` | `$kspec-implement` | `read-only` | Code review contra spec e rules |
 | `kspec-qa-runner` | `$kspec-qa` | `workspace-write` | Testa E2E, acessibilidade, visual |
 
-## Rules — Padrões de Código
+## Rules
 
-As rules ficam em `.agents/rules/`. Consulte-as diretamente pelo caminho — o conteúdo não é duplicado aqui.
+`.agents/rules/` contém rules do ecossistema kspec (orientadas a TypeScript/Java). Para código Go do kterminal, prevalecem os padrões do próprio código-base:
 
-| Rule | Caminho | Escopo |
-| --- | --- | --- |
-| Padrões de código | `.agents/rules/code-standards.md` | Nomenclatura, formatação, SOLID |
-| Arquitetura DDD | `.agents/rules/architecture-ddd.md` | DDD + Bounded Contexts (default em projetos novos) |
-| Banco de dados | `.agents/rules/database.md` | ORM, queries, migrations |
-| Logging | `.agents/rules/logging.md` | Níveis e estrutura de log |
-| Graphify | `.agents/rules/graphify.md` | Knowledge graph para análise |
+- **Sem comentários no código**
+- Eventos do agente via canal; TUI com receivers por valor; `strings.Builder` sempre por ponteiro
+- Tools registradas no construtor do `Registry` (`internal/tools/tools.go`)
+- Assets embutidos via `go:embed` (precedentes: `models.yaml`, `markdown.json`)
 
-## MCP Opt-in
+## Git
 
-O Codex CLI não descobre MCPs automaticamente. Para habilitar MCPs (context7, testsprite), crie ou edite `.codex/config.toml`:
-
-```toml
-[mcp_servers.context7]
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
-
-[mcp_servers.testsprite]
-command = "npx"
-args = ["-y", "testsprite-mcp"]
-```
-
-Alternativamente, use `$kspec-bootstrap` em modo interativo — a skill perguntará se deseja registrar os MCPs.
+- **Não execute** `git restore`, `git reset`, `git clean` ou comandos destrutivos **sem permissão explícita do usuário**
+- Binário `kterminal` e `*.test` não são versionados (`.gitignore`)
 
 ## Limitações conhecidas no Codex
 
-1. **Ausência de slash commands de projeto**: o Codex CLI não suporta slash commands de projeto (`/kspec-prd`). Use `$kspec-<nome>` ou linguagem natural para invocar skills.
+1. **Ausência de slash commands de projeto**: o Codex CLI não suporta slash commands de projeto (`/kspec-prd`). Use `$kspec-<nome>` ou linguagem natural.
 
-2. **Ausência de `AskUserQuestion` em `codex exec`**: o modo não-interativo (`codex exec`) não suporta perguntas ao usuário. As seguintes skills só funcionam em modo interativo (`codex` sem argumentos):
-   - `kspec-prd`
-   - `kspec-techspec`
-   - `kspec-tasks`
-   - `kspec-implement`
-   - `kspec-bugfix`
-   - `kspec-bootstrap`
+2. **Ausência de `AskUserQuestion` em `codex exec`**: o modo não-interativo não suporta perguntas ao usuário. As skills `kspec-prd`, `kspec-techspec`, `kspec-tasks`, `kspec-implement`, `kspec-bugfix` e `kspec-bootstrap` só funcionam em modo interativo.
 
-3. **Necessidade de MCP em `.codex/config.toml`**: MCPs como context7 e testsprite não são descobertos automaticamente. Devem ser declarados explicitamente em `.codex/config.toml` (projeto) ou `~/.codex/config.toml` (global). Veja a seção "MCP Opt-in" acima.
+3. **Sandbox dos agents**: `kspec-task-runner` e `kspec-qa-runner` exigem `sandbox_mode = "workspace-write"`. Execute o Codex com permissões de escrita no workspace.
 
-4. **Sandbox dos agents**: `kspec-task-runner` e `kspec-qa-runner` exigem `sandbox_mode = "workspace-write"`. Execute o Codex com permissões de escrita no workspace quando usar esses agents.
+4. **MCP Opt-in**: MCPs não são descobertos automaticamente. Declare-os em `.codex/config.toml` (projeto) ou `~/.codex/config.toml` (global).
 
-5. **Symlinks em Windows**: em sistemas Windows, `.codex/skills/` usa cópias em vez de symlinks. Após `kspec update`, resincronize manualmente se necessário.
+5. **Symlinks em Windows**: em sistemas Windows, `.codex/skills/` usa cópias em vez de symlinks.

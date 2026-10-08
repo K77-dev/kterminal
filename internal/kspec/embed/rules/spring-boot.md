@@ -1,0 +1,398 @@
+---
+paths:
+  - "src/main/java/**/*.java"
+  - "src/main/resources/**"
+---
+
+# Spring Boot
+
+## Framework
+
+Utilize Spring Boot 3+ com Spring Framework 6+. Use `@SpringBootApplication` como ponto de entrada.
+
+**Exemplo:**
+```java
+@SpringBootApplication
+public class Application {
+  public static void main(String[] args) {
+    SpringApplication.run(Application.class, args);
+  }
+}
+```
+
+## Build Tool
+
+Utilize Maven como build tool. Nunca Gradle.
+
+**Exemplo:**
+```xml
+<parent>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-parent</artifactId>
+  <version>3.3.0</version>
+</parent>
+
+<dependencies>
+  <dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+  </dependency>
+</dependencies>
+```
+
+## Estrutura de Pacotes
+
+Organize por feature/dominio, nao por camada tecnica.
+
+**Exemplo:**
+```java
+// ❌ Evite - por camada
+com.empresa.controllers.UserController
+com.empresa.controllers.OrderController
+com.empresa.services.UserService
+com.empresa.services.OrderService
+com.empresa.repositories.UserRepository
+
+// ✅ Prefira - por dominio
+com.empresa.user.UserController
+com.empresa.user.UserService
+com.empresa.user.UserRepository
+com.empresa.order.OrderController
+com.empresa.order.OrderService
+com.empresa.order.OrderRepository
+```
+
+## REST Controllers
+
+Use `@RestController`. Endpoints seguem padrao REST: recursos em ingles, plural, kebab-case. Use `@GetMapping`, `@PostMapping`, etc. Retorne `ResponseEntity<T>` com status HTTP apropriado.
+
+**Exemplo:**
+```java
+@RestController
+@RequestMapping("/users")
+public class UserController {
+
+  private final UserService userService;
+
+  public UserController(UserService userService) {
+    this.userService = userService;
+  }
+
+  @GetMapping
+  public ResponseEntity<List<UserDTO>> listUsers() {
+    var users = userService.findAll();
+    return ResponseEntity.ok(users);
+  }
+
+  @GetMapping("/{userId}")
+  public ResponseEntity<UserDTO> getUser(@PathVariable String userId) {
+    var user = userService.findById(userId);
+    return ResponseEntity.ok(user);
+  }
+
+  @PostMapping
+  public ResponseEntity<UserDTO> createUser(@Valid @RequestBody CreateUserRequest request) {
+    var user = userService.create(request);
+    return ResponseEntity.status(HttpStatus.CREATED).body(user);
+  }
+
+  @PostMapping("/{userId}/change-password")
+  public ResponseEntity<Void> changePassword(
+      @PathVariable String userId,
+      @Valid @RequestBody ChangePasswordRequest request) {
+    userService.changePassword(userId, request);
+    return ResponseEntity.ok().build();
+  }
+}
+```
+
+## DTOs com Records
+
+Use Java records para request/response DTOs. Nunca exponha entidades JPA diretamente nos endpoints. Separe modelos de entrada e saida.
+
+**Exemplo:**
+```java
+// ❌ Evite - entidade JPA no endpoint
+@GetMapping("/{id}")
+public ResponseEntity<User> getUser(@PathVariable String id) {
+  return ResponseEntity.ok(userRepository.findById(id).orElseThrow());
+}
+
+// ✅ Prefira - DTOs separados
+public record CreateUserRequest(
+    @NotBlank String name,
+    @Email String email
+) {}
+
+public record UserDTO(String id, String name, String email, LocalDateTime createdAt) {
+  public static UserDTO from(User user) {
+    return new UserDTO(user.getId(), user.getName(), user.getEmail(), user.getCreatedAt());
+  }
+}
+```
+
+## Camada de Servico
+
+Logica de negocio em classes `@Service`. Controllers delegam para services. Services nao dependem de controllers.
+
+**Exemplo:**
+```java
+@Service
+public class OrderService {
+
+  private final OrderRepository orderRepository;
+  private final PaymentService paymentService;
+
+  public OrderService(OrderRepository orderRepository, PaymentService paymentService) {
+    this.orderRepository = orderRepository;
+    this.paymentService = paymentService;
+  }
+
+  public OrderDTO create(CreateOrderRequest request) {
+    var order = new Order(request.items(), request.customerId());
+    paymentService.process(order);
+    var saved = orderRepository.save(order);
+    return OrderDTO.from(saved);
+  }
+
+  public void cancel(String orderId) {
+    var order = orderRepository.findById(orderId)
+        .orElseThrow(() -> new OrderNotFoundException(orderId));
+    if (order.getStatus() == OrderStatus.SHIPPED) {
+      throw new BusinessException("Nao e possivel cancelar pedido ja enviado");
+    }
+    order.cancel();
+    orderRepository.save(order);
+  }
+}
+```
+
+## Injecao de Dependencia
+
+Prefira injecao via construtor. Nunca `@Autowired` em campos. Use `final` nos campos injetados.
+
+**Exemplo:**
+```java
+// ❌ Evite
+@Service
+public class UserService {
+  @Autowired
+  private UserRepository repository;
+}
+
+// ✅ Prefira
+@Service
+public class UserService {
+  private final UserRepository repository;
+  private final EmailService emailService;
+
+  public UserService(UserRepository repository, EmailService emailService) {
+    this.repository = repository;
+    this.emailService = emailService;
+  }
+}
+```
+
+## JPA e Repositorios
+
+Use `@Repository` com Spring Data JPA. Prefira query methods (`findByEmail`) sobre `@Query` quando possivel.
+
+**Exemplo:**
+```java
+@Entity
+@Table(name = "users")
+public class User {
+  @Id
+  @GeneratedValue(strategy = GenerationType.UUID)
+  private String id;
+
+  @Column(nullable = false)
+  private String name;
+
+  @Column(nullable = false, unique = true)
+  private String email;
+
+  @Column(nullable = false, updatable = false)
+  private LocalDateTime createdAt = LocalDateTime.now();
+
+  // construtor, getters
+}
+
+public interface UserRepository extends JpaRepository<User, String> {
+  Optional<User> findByEmail(String email);
+  List<User> findByNameContainingIgnoreCase(String name);
+  boolean existsByEmail(String email);
+}
+```
+
+## Validacao
+
+Use Bean Validation (`@Valid`, `@NotBlank`, `@Email`, `@Size`). Valide no controller com `@Valid` no parametro.
+
+**Exemplo:**
+```java
+public record CreateUserRequest(
+    @NotBlank(message = "Nome e obrigatorio")
+    @Size(min = 2, max = 100, message = "Nome deve ter entre 2 e 100 caracteres")
+    String name,
+
+    @NotBlank(message = "Email e obrigatorio")
+    @Email(message = "Email invalido")
+    String email,
+
+    @NotNull(message = "Idade e obrigatoria")
+    @Min(value = 18, message = "Idade minima e 18 anos")
+    Integer age
+) {}
+
+@PostMapping
+public ResponseEntity<UserDTO> createUser(@Valid @RequestBody CreateUserRequest request) {
+  var user = userService.create(request);
+  return ResponseEntity.status(HttpStatus.CREATED).body(user);
+}
+```
+
+## Tratamento de Erros
+
+Use `@RestControllerAdvice` com `@ExceptionHandler` para tratamento global. Retorne formato padronizado com `ProblemDetail` (RFC 7807).
+
+**Exemplo:**
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+  @ExceptionHandler(ResourceNotFoundException.class)
+  public ProblemDetail handleNotFound(ResourceNotFoundException ex) {
+    var problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    problem.setTitle("Recurso nao encontrado");
+    return problem;
+  }
+
+  @ExceptionHandler(BusinessException.class)
+  public ProblemDetail handleBusiness(BusinessException ex) {
+    var problem = ProblemDetail.forStatusAndDetail(
+        HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+    problem.setTitle("Erro de negocio");
+    return problem;
+  }
+
+  @ExceptionHandler(MethodArgumentNotValidException.class)
+  public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
+    var problem = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+    problem.setTitle("Erro de validacao");
+    var errors = ex.getBindingResult().getFieldErrors().stream()
+        .collect(Collectors.toMap(
+            FieldError::getField,
+            FieldError::getDefaultMessage
+        ));
+    problem.setProperty("errors", errors);
+    return problem;
+  }
+}
+```
+
+## Configuracao
+
+Use `application.yml` (nunca `.properties`). Externalize configuracoes com `@ConfigurationProperties`. Nunca hardcode valores sensiveis. Use profiles (`dev`, `prod`).
+
+**Exemplo:**
+```yaml
+# application.yml
+spring:
+  application:
+    name: my-service
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USER}
+    password: ${DATABASE_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+---
+# application-dev.yml
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: jdbc:postgresql://localhost:5432/mydb
+```
+
+```java
+@ConfigurationProperties(prefix = "app.email")
+public record EmailProperties(
+    String from,
+    String replyTo,
+    int maxRetries
+) {}
+```
+
+## Logging
+
+Use SLF4J com `LoggerFactory`. Nunca `System.out.println()`.
+
+**Exemplo:**
+```java
+// ❌ Evite
+System.out.println("Usuario criado: " + user.getId());
+
+// ✅ Prefira
+@Service
+public class UserService {
+  private static final Logger log = LoggerFactory.getLogger(UserService.class);
+
+  public UserDTO create(CreateUserRequest request) {
+    log.info("Criando usuario com email: {}", request.email());
+    var user = userRepository.save(new User(request.name(), request.email()));
+    log.debug("Usuario criado com id: {}", user.getId());
+    return UserDTO.from(user);
+  }
+}
+```
+
+## Migrations de Banco
+
+Use Flyway para versionamento de schema. Nunca `spring.jpa.hibernate.ddl-auto=update` ou `create` em producao.
+
+**Exemplo:**
+```sql
+-- src/main/resources/db/migration/V1__create_users_table.sql
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- src/main/resources/db/migration/V2__add_age_to_users.sql
+ALTER TABLE users ADD COLUMN age INTEGER;
+```
+
+## Seguranca
+
+Use Spring Security com `SecurityFilterChain`. Nunca `WebSecurityConfigurerAdapter` (deprecado).
+
+**Exemplo:**
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+  @Bean
+  public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    return http
+        .csrf(csrf -> csrf.disable())
+        .sessionManagement(session ->
+            session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/public/**").permitAll()
+            .requestMatchers("/admin/**").hasRole("ADMIN")
+            .anyRequest().authenticated()
+        )
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+        .build();
+  }
+}
+```

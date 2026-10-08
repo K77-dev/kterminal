@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,16 +17,20 @@ import (
 	"kterminal/internal/catalog"
 	"kterminal/internal/config"
 	"kterminal/internal/jev"
+	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
+	"kterminal/internal/telemetry"
 	"kterminal/internal/tools"
 	"kterminal/internal/tui"
 )
 
 func main() {
 	confirm := flag.Bool("confirm", false, "ask for confirmation before mutating tools (write/edit/bash)")
+	continueFlag := flag.Bool("continue", false, "resume the most recent session (ignored when --session is set)")
 	doctor := flag.Bool("doctor", false, "run setup checks and exit")
+	sessionFlag := flag.String("session", "", "resume the session file at this path (takes precedence over --continue)")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -37,15 +44,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	store := telemetry.Load(telemetryPath())
+	kspecStore := kspec.Load()
+
 	if *doctor {
-		runDoctor(cfg, cat)
+		runDoctor(cfg, cat, store, kspecStore)
 		return
 	}
 
-	sess, err := session.NewWriter()
+	defer store.Close()
+
+	sess, resumed, freshWarning, err := resolveSession(*continueFlag, *sessionFlag)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "kterminal:", err)
 		os.Exit(1)
+	}
+	if sess == nil {
+		sess, err = session.NewWriter()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	}
 
 	var llmClient *llm.Client
@@ -62,19 +81,80 @@ func main() {
 		fallback = nil
 	}
 
-	ag := agent.New(llmClient, jevRouter, fallback, cat, tools.NewRegistry(), sess, *confirm)
+	reg := tools.NewRegistry()
+	reg.SetOnGoEdit(tools.GoVetHook)
+
+	ag := agent.New(llmClient, jevRouter, fallback, cat, reg, sess, *confirm)
+	ag.Telemetry = store
+	ag.AttachKspec(kspecStore)
+	ag.AttachTaskTool()
+	ag.AttachAskUserTool()
+	if len(resumed.Messages) > 0 {
+		ag.SetMessages(resumed.Messages)
+	}
+	if resumed.Skill != "" {
+		ag.RestoreSkill(resumed.Skill)
+	}
 
 	dark := lipgloss.HasDarkBackground()
-	p := tea.NewProgram(tui.New(ag, cfg, cat, dark), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	opts := []tui.Option{tui.WithKspec(kspecStore)}
+	if len(resumed.Messages) > 0 {
+		opts = append(opts, tui.WithResumed(resumed.Messages))
+	}
+	if freshWarning {
+		opts = append(opts, tui.WithFreshWarning())
+	}
+	p := tea.NewProgram(tui.New(ag, cfg, cat, dark, opts...), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		sess.Close()
+		store.Close()
 		os.Exit(1)
 	}
 	sess.Close()
 }
 
-func runDoctor(cfg *config.Config, cat *catalog.Catalog) {
+func resolveSession(continueFlag bool, sessionPath string) (*session.Writer, session.Snapshot, bool, error) {
+	if sessionPath != "" {
+		snap, err := session.Load(sessionPath)
+		if err != nil {
+			return nil, session.Snapshot{}, false, err
+		}
+		w, err := session.AppendWriter(sessionPath)
+		if err != nil {
+			return nil, session.Snapshot{}, false, err
+		}
+		return w, snap, false, nil
+	}
+	if continueFlag {
+		path, snap, err := session.LoadLatest()
+		if errors.Is(err, session.ErrNoSessions) {
+			return nil, session.Snapshot{}, true, nil
+		}
+		if err != nil {
+			return nil, session.Snapshot{}, false, err
+		}
+		w, err := session.AppendWriter(path)
+		if err != nil {
+			return nil, session.Snapshot{}, false, err
+		}
+		return w, snap, false, nil
+	}
+	return nil, session.Snapshot{}, false, nil
+}
+
+func telemetryPath() string {
+	if base := os.Getenv("XDG_DATA_HOME"); base != "" {
+		return filepath.Join(base, "kterminal", "telemetry.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".kterminal", "telemetry.json")
+	}
+	return filepath.Join(home, ".local", "share", "kterminal", "telemetry.json")
+}
+
+func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store, kspecStore *kspec.Store) {
 	ok := true
 	fmt.Println("kterminal doctor")
 	fmt.Println()
@@ -142,10 +222,44 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog) {
 		}
 	}
 
+	fmt.Println()
+	fmt.Print(doctorKspecSection(kspecStore))
+
+	fmt.Println()
+	fmt.Print(doctorTelemetryTable(store, cat))
+
 	if !ok {
 		os.Exit(1)
 	}
 	fmt.Println("all checks passed")
+}
+
+func doctorKspecSection(store *kspec.Store) string {
+	var b strings.Builder
+	source := store.Source()
+	if v := store.Version(); v != "" {
+		fmt.Fprintf(&b, "kspec: v%s (%s)\n", v, source)
+	} else {
+		fmt.Fprintf(&b, "kspec: version unknown (%s)\n", source)
+	}
+	for _, inv := range store.Invalid() {
+		fmt.Fprintf(&b, "  WARNING: invalid skill %s: %v\n", inv.Dir, inv.Err)
+	}
+	return b.String()
+}
+
+func doctorTelemetryTable(store *telemetry.Store, cat *catalog.Catalog) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "telemetry: model | measured (mean tok/s, samples) | estimate (tok/s)")
+	for _, m := range cat.Models {
+		mean, samples := store.GetMean(m.Name)
+		measured := "no samples"
+		if samples > 0 {
+			measured = fmt.Sprintf("%.1f tok/s, %d samples", mean, samples)
+		}
+		fmt.Fprintf(&b, "  %s | %s | %.0f tok/s\n", m.Name, measured, m.TPSEstimate)
+	}
+	return b.String()
 }
 
 func display(s string) string {

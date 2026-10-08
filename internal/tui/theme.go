@@ -17,6 +17,8 @@ var (
 	colYellow       = lipgloss.Color("#e5c07b")
 	colText         = lipgloss.Color("#eeeeee")
 	colTextMuted    = lipgloss.Color("#808080")
+	colDiffAdded    = lipgloss.Color("#4fd6be")
+	colDiffRemoved  = lipgloss.Color("#c53b53")
 	colBg           = lipgloss.Color("#0a0a0a")
 	colBgPanel      = lipgloss.Color("#141414")
 	colBgElement    = lipgloss.Color("#1e1e1e")
@@ -51,10 +53,12 @@ var (
 	promptBoxStyle = lipgloss.NewStyle().
 			Border(leftBorder, false, false, false, true).
 			BorderForeground(colBorderActive).
-			Background(colBgElement).
 			Padding(1, 2)
 
 	routeStyle = lipgloss.NewStyle().
+			Foreground(colTextMuted)
+
+	compactionStyle = lipgloss.NewStyle().
 			Foreground(colTextMuted)
 
 	toolStyle = lipgloss.NewStyle().
@@ -62,6 +66,18 @@ var (
 
 	resultStyle = lipgloss.NewStyle().
 			Foreground(colTextMuted)
+
+	nestedStyle = lipgloss.NewStyle().
+			Foreground(colSecondary)
+
+	diffAddedStyle = lipgloss.NewStyle().
+			Foreground(colDiffAdded)
+
+	diffRemovedStyle = lipgloss.NewStyle().
+				Foreground(colDiffRemoved)
+
+	diffContextStyle = lipgloss.NewStyle().
+				Foreground(colTextMuted)
 
 	metaMarkStyle = lipgloss.NewStyle().
 			Foreground(colAccent)
@@ -78,9 +94,6 @@ var (
 
 	labelStyle = lipgloss.NewStyle().
 			Foreground(colTextMuted)
-
-	fadeStyle = lipgloss.NewStyle().
-			Foreground(colBgElement)
 
 	fadeCornerStyle = lipgloss.NewStyle().
 			Foreground(colBorderActive)
@@ -108,6 +121,21 @@ var (
 				BorderForeground(colPrimary).
 				Background(colBgElement).
 				Padding(0, 2)
+
+	mentionPopupStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colBorder).
+				Background(colBgPanel).
+				Padding(0, 1)
+
+	mentionItemStyle = lipgloss.NewStyle().
+				Foreground(colTextMuted)
+
+	mentionSelectedStyle = lipgloss.NewStyle().
+				Foreground(colPrimary)
+
+	chipStyle = lipgloss.NewStyle().
+			Foreground(colSecondary)
 )
 
 var logoLeft = []string{

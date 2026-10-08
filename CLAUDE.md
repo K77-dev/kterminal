@@ -1,88 +1,68 @@
 # CLAUDE.md
 
-Guia para agentes de IA ao trabalhar com o código deste repositório.
+Guia para agentes de IA ao trabalhar com o código deste repositório — plataforma Claude Code.
 
-Este projeto é o **kspec** — um kit de especificações e padrões para projetos desenvolvidos com agentes de IA. Contém skills, agents, rules e templates para Claude Code, OpenAI Codex CLI e Cursor. **Não contém código de aplicação executável.**
+Este projeto é o **kterminal** — um coding agent de terminal (TUI agêntica) em Go, no estilo Claude Code/opencode. O diferencial: o roteador externo **Jev** (Typesafe) escolhe o LLM a cada chamada, pesando qualidade, custo e tokens/s reais medidos. O desenvolvimento do próprio kterminal segue o fluxo SDD do **kspec** (dogfooding).
 
 > Para OpenAI Codex CLI, consulte `AGENTS.md`. Para Cursor, consulte `CURSOR.md`.
 
 ### Idioma
 
-- **Código-fonte**: inglês (variáveis, funções, classes, comentários)
-- **Specs e documentação de projeto** (PRD, tech spec, tasks, reviews): português (Brasil)
+- **Código-fonte**: inglês (identificadores, mensagens de erro, textos da TUI)
+- **Specs e documentação de projeto** (briefs `.docs/`, PRD, tech spec, tasks, reviews): português (Brasil)
 
-### Prioridades
+### Arquitetura
 
-- **`.agents/` é o source of truth** — todas as mudanças em skills, agents, rules e templates devem ser feitas em `.agents/` primeiro
-- **Sempre verifique as skills** antes de implementar — tarefas sem skills relevantes podem ser invalidadas
-- **Não use workarounds** — prefira correções de causa raiz
-- **Mantenha paridade** entre os diretórios de plataforma (`.agents/`, `.claude/`, `.codex/`, `.cursor/`) — `.agents/` é source of truth; `.claude/`, `.codex/` e `.cursor/` são camadas de discovery via symlinks e artefatos derivados
-
-### Estrutura do projeto
-
-```
-/                                # Raiz do kspec
-├── .agents/                     # Skills, agents, rules, templates (source of truth)
-│   ├── skills/                  # Skills invocáveis
-│   ├── agents/                  # Agents para automação
-│   ├── rules/                   # Padrões por tecnologia
-│   └── templates/               # Templates para artefatos
-├── .claude/                     # Espelhos de .agents/ (symlinks) — discovery para Claude Code
-│   ├── skills/                  # → .agents/skills/
-│   ├── agents/                  # → .agents/agents/
-│   ├── rules/                   # → .agents/rules/
-│   └── templates/               # → .agents/templates/
-├── .codex/                      # Espelhos de .agents/ (symlinks) — discovery para OpenAI Codex CLI
-│   ├── skills/                  # → .agents/skills/
-│   └── agents/                  # Agents no formato TOML para Codex CLI
-├── .cursor/                     # Discovery para Cursor
-│   ├── skills/                  # → .agents/skills/ (symlinks)
-│   ├── agents/                  # → .agents/agents/ (symlinks)
-│   ├── templates/               # → .agents/templates/ (symlink)
-│   └── rules/                   # *.mdc derivados de .agents/rules/*.md
-├── .github/                     # GitHub Actions, instructions
-├── AGENTS.md                    # Guia para OpenAI Codex CLI (equivalente ao CLAUDE.md)
-├── CURSOR.md                    # Guia para Cursor (equivalente ao CLAUDE.md)
-├── spec/
-│   └── tasks/                   # Artefatos gerados (PRDs, techspecs, tasks, reviews)
-├── src/                         # Código-fonte principal
-├── dist/                        # Build output
-├── CLAUDE.md                    # Este arquivo — guia para Claude Code
-├── CLAUDE.bootstrap.md          # Configuração auto-gerada (atualize CLAUDE.md com este conteúdo)
-├── README.md                    # Documentação pública do projeto
-├── VERSION                      # Versão do kspec
-├── package.json                 # Dependências Node.js
-├── tsconfig.json                # Configuração TypeScript
-├── tsup.config.ts               # Configuração tsup (bundler)
-└── .gitignore                   # Arquivos ignorados pelo git
-```
+- `main.go` — entry point: flags (`--confirm`, `--continue`, `--session`, `--doctor`), wiring de config/catalog/router/agent/TUI
+- `internal/agent/` — loop agêntico; eventos via canal (`EventRoute`, `EventDelta`, `EventToolStart`, `EventToolResult`, `EventConfirm`, `EventTurnDone`, `EventTurnAborted`, `EventError`); subagentes via tool `task` (limite 10 steps / 5 min); compactação de contexto no limiar de 70% (sumário via `deepseek-v4.1-flash`)
+- `internal/router/` — interface `Router`; `JevRouter` (API Typesafe systemone, modelo `jev-latest`) com fallback heurístico por keywords
+- `internal/llm/` — cliente HTTP próprio, OpenAI-compatible, streaming (`POST /v1/chat/completions`, `GET /v1/models`)
+- `internal/catalog/` — catálogo de modelos embutido via `go:embed models.yaml` (default `glm-5.2`)
+- `internal/tools/` — registry + tools `read`, `glob`, `grep`, `write`, `edit`, `bash`, `task`; diff colorido em write/edit; hook `go vet` pós-edição de `.go` (`diagnostics.go`)
+- `internal/tui/` — TUI Bubble Tea; slash commands (`/quit`, `/exit`, `/help`, `/clear`, `/config`, `/model`, `/image`, `/unimage`); @menções de arquivo; anexo de imagens (5MB, base64); estilo Glamour embutido (`markdown.json`)
+- `internal/session/` — transcripts JSONL + snapshots para resume (`~/.local/share/kterminal/sessions/`)
+- `internal/config/` — config TOML (`~/.config/kterminal/config.toml`, XDG; env vars `KTERMINAL_LLM_BASE_URL`, `KTERMINAL_LLM_API_KEY`, `TYPESAFE_API_KEY`)
+- `internal/telemetry/` — TPS real medido por modelo (`~/.local/share/kterminal/telemetry.json`)
 
 ### Comandos do projeto
 
 ```bash
-npm install                    # Instalar dependências
-npm run dev                    # Watch mode durante desenvolvimento
-npm run build                  # Build da distribuição
-npm run prepublishOnly         # Pre-publish hook (roda automaticamente antes de npm publish)
-npm test                       # Executar testes
-npm run test:watch             # Watch mode para testes
+go build ./...                 # Build (produz o binário kterminal na raiz)
+go run .                       # Rodar em desenvolvimento
+go vet ./...                   # Análise estática
+gofmt -l .                     # Formatação (não deve listar nenhum arquivo)
+go test ./...                  # Testes
 ```
 
-### Stack e tecnologias
+Verificação completa: `go build ./... && go vet ./... && gofmt -l . && go test ./...`
 
-| Camada         | Tecnologia                        | Descrição                              |
-| -------------- | --------------------------------- | -------------------------------------- |
-| **Linguagem**  | TypeScript 5.6+                   | Tipagem estática, targets ES2022       |
-| **Runtime**    | Node.js >= 18                     | Execução de CLI e scripts              |
-| **Build**      | tsup 8.3+                         | Bundler TypeScript otimizado           |
-| **Package Mgr**| npm                               | Gerenciador de dependências            |
-| **Publishing** | npm registry (@k77-dev/kspec)     | Pacote público do kspec                |
-| **CLI**        | commander 12.1+, chalk 5.3+       | CLI args parsing e output colorido     |
-| **Utils**      | fs-extra 11.2+                    | Utilitários de filesystem              |
+### Stack
 
-### Recursos do projeto
+| Camada | Tecnologia | Descrição |
+| --- | --- | --- |
+| **Linguagem** | Go 1.27 | Módulo `kterminal`, binário único auto-contido |
+| **TUI** | Charmbracelet | Bubble Tea, Lipgloss, Glamour, bubbles |
+| **LLM** | Cliente HTTP próprio | OpenAI-compatible, streaming |
+| **Roteamento** | Jev (Typesafe) | `api.typesafe.ai/v1/systemone` + fallback heurístico |
+| **Config** | TOML (BurntSushi) | XDG: `~/.config/kterminal/` |
 
-#### Skills Disponíveis (Invocáveis)
+### Fluxo SDD (dogfooding)
+
+O kterminal é desenvolvido pelo fluxo kspec — toda feature nova segue:
+
+1. Brief da feature em `.docs/NN-<slug>.md` (formato: Contexto / Objetivo / Especificação / Critérios de aceitação / Verificação / Restrições)
+2. Skill `kspec-prd` → `spec/tasks/NNN-prd-<slug>/prd.md`
+3. Skill `kspec-techspec` → `techspec.md`
+4. Skill `kspec-tasks` → `tasks.md` + `N_task.md`
+5. Skill `kspec-implement` → implementação sequencial com review por task
+
+As features 001–010 foram implementadas assim: briefs em `.docs/01-*.md` a `10-*.md`, artefatos em `spec/tasks/001-*` a `010-*`.
+
+### Skills kspec
+
+`.agents/` é o source of truth (skills, agents, rules, templates). `.claude/`, `.codex/` e `.cursor/` são camadas de discovery (symlinks e artefatos derivados). Skills de terceiros (mattpocock/skills) são rastreadas em `skills-lock.json`.
+
+No Claude Code, invoque com `/kspec-<nome>`:
 
 | Skill | Função |
 | --- | --- |
@@ -92,61 +72,38 @@ npm run test:watch             # Watch mode para testes
 | `kspec-tasks` | Quebra Tech Spec em tarefas incrementais |
 | `kspec-implement` | Executa todas as tasks pendentes |
 | `kspec-qa` | Quality Assurance (E2E, acessibilidade) |
-| `kspec-pr-review` | Alinhamento semântico spec × implementação e corpo do PR (template oficial) |
+| `kspec-pr-review` | Alinhamento semântico spec × implementação e corpo do PR |
 | `kspec-bugfix` | Corrige bugs documentados pelo QA |
-| `kspec-bootstrap` | Gera configuração para projeto existente |
+| `kspec-bootstrap` | Gera configuração kspec para projeto existente |
 | `kspec-version` | Exibe versão atual e lista skills/agents |
 
-#### Agents (Acionados por Skills)
+### Rules
 
-| Agent | Acionado por | Função |
-| --- | --- | --- |
-| `kspec-task-runner` | `/kspec-implement` | Implementa uma task em contexto isolado |
-| `kspec-review-runner` | `/kspec-implement` | Code review contra spec e rules |
-| `kspec-qa-runner` | `/kspec-qa` | Testa E2E, acessibilidade, visual |
+`.agents/rules/` contém rules do ecossistema kspec (orientadas a TypeScript/Java — `code-standards.md`, `architecture-ddd.md`, `database.md`, `logging.md`, etc.). Para código Go do kterminal, prevalecem os padrões do próprio código-base (seção Restrições dos briefs), não as rules TS.
 
-### Rules — Padrões de Código
+### Restrições de código Go
 
-| Rule | Escopo | Verificar em |
-| --- | --- | --- |
-| `code-standards.md` | Nomenclatura, formatação, SOLID | Todos os arquivos `.ts`, `.tsx` |
-| `architecture-ddd.md` | DDD + Bounded Contexts (default para projetos novos) | `src/modules/**`, `src/shared/**` |
-| `database.md` | ORM, queries, migrations | `src/**/*db*`, `src/**/*repo*` |
-| `logging.md` | Níveis e estrutura | `src/**/*log*`, `src/**/*service*` |
-| `graphify.md` | Knowledge graph (skills análise) | `.agents/`, se `graphify-out/graph.json` existe |
+- **Sem comentários no código**
+- Eventos do agente via canal; TUI com receivers por valor; `strings.Builder` sempre por ponteiro
+- Tools registradas no construtor do `Registry` (`internal/tools/tools.go`)
+- Assets embutidos via `go:embed` (precedentes: `models.yaml`, `markdown.json`)
 
 ### Git
 
 - **Não execute** `git restore`, `git reset`, `git clean` ou comandos destrutivos **sem permissão explícita do usuário**
-- **Prioridade de repositórios**:
-  - `.agents/` é o source of truth
-  - Mudanças em `.claude/`, `.codex/` ou `.cursor/` devem estar refletidas em `.agents/` primeiro
-  - Symlinks e artefatos derivados garantem paridade entre plataformas
+- Binário `kterminal` e `*.test` não são versionados (`.gitignore`)
 
 ### Limitações conhecidas no Claude Code
 
-1. **Slash commands de projeto**: o Claude Code suporta `/kspec-<nome>` como invocação nativa — use `/kspec-prd`, não `$kspec-prd` (sintaxe Codex) nem apenas menção textual (padrão Cursor).
+1. **Modo interativo obrigatório**: skills como `kspec-prd`, `kspec-techspec`, `kspec-tasks`, `kspec-implement`, `kspec-bugfix` e `kspec-bootstrap` dependem de `AskUserQuestion` — não funcionam em fluxos não-interativos.
 
-2. **Modo interativo obrigatório**: skills como `kspec-prd`, `kspec-techspec`, `kspec-tasks`, `kspec-implement`, `kspec-bugfix` e `kspec-bootstrap` dependem de `AskUserQuestion` — não funcionam em fluxos não-interativos.
+2. **Agents**: `kspec-task-runner` e `kspec-qa-runner` exigem permissão de escrita no workspace.
 
-3. **Preservação de settings**: `kspec update` nunca altera `settings.json` nem `settings.local.json` do Claude Code.
-
-4. **Symlinks em Windows**: em sistemas Windows, `.claude/skills/` pode usar cópias em vez de symlinks. Após `kspec update`, resincronize manualmente se necessário.
-
-5. **MCP opt-in**: MCPs como context7 e testsprite não são descobertos automaticamente. Configure-os nas settings do Claude Code ou via opt-in no `kspec-bootstrap`.
+3. **Symlinks em Windows**: em sistemas Windows, `.claude/skills/` pode usar cópias em vez de symlinks.
 
 ### Anti-padrões
 
-1. **Pular ativação de skill** — sempre invocar `/skill-name` quando a task pedir
-2. **Usar a branch errada** — `.agents/` é source of truth, não `.claude/`
+1. **Pular ativação de skill** — sempre invocar `/kspec-<nome>` quando a task pedir
+2. **Editar `.claude/`, `.codex/`, `.cursor/` diretamente** — o source of truth é `.agents/`
 3. **Executar comandos git destrutivos sem permissão**
-4. **Criar regras genéricas** — rules devem ser específicas à tecnologia detectada
-
-### Próximos Passos
-
-1. **Revise este arquivo** (`CLAUDE.bootstrap.md`) com as detecções automáticas
-2. **Renomeie para `CLAUDE.md`** quando estiver satisfeito (sobrescreverá o anterior)
-3. **Use `/kspec-prd`** para criar seu primeiro PRD
-4. **Use `/kspec-techspec`** para traduzir PRD em especificação técnica
-5. **Use `/kspec-tasks`** para quebrar a techspec em tarefas
-6. **Use `/kspec-implement`** para executar todas as tasks pendentes
+4. **Adicionar comentários ao código Go**

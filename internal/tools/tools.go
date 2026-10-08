@@ -1,40 +1,59 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"kterminal/internal/llm"
 )
 
-type Executor func(args map[string]any) (string, error)
+type Result struct {
+	Output string
+	Diff   []DiffLine
+}
+
+type Executor func(ctx context.Context, args map[string]any) (Result, error)
+
+type StreamExecutor func(ctx context.Context, args map[string]any, onLine func(string)) (Result, error)
+
+type PendingDiffFunc func(ctx context.Context, args map[string]any) ([]DiffLine, error)
 
 type Tool struct {
-	Name     string
-	Mutating bool
-	Schema   llm.Tool
-	Execute  Executor
+	Name          string
+	Mutating      bool
+	Schema        llm.Tool
+	Execute       Executor
+	ExecuteStream StreamExecutor
+	PendingDiff   PendingDiffFunc
 }
 
 type Registry struct {
-	tools map[string]Tool
-	order []string
+	tools    map[string]Tool
+	order    []string
+	OnGoEdit func(path string) string
 }
 
 func NewRegistry() *Registry {
 	r := &Registry{tools: map[string]Tool{}}
-	r.register(readTool())
-	r.register(globTool())
-	r.register(grepTool())
-	r.register(writeTool())
-	r.register(editTool())
-	r.register(bashTool())
+	r.Register(readTool())
+	r.Register(globTool())
+	r.Register(grepTool())
+	r.Register(writeTool())
+	r.Register(editTool())
+	r.Register(bashTool())
+	r.Register(kspecBootstrapTool())
 	return r
 }
 
-func (r *Registry) register(t Tool) {
+func (r *Registry) Register(t Tool) {
 	r.tools[t.Name] = t
 	r.order = append(r.order, t.Name)
+}
+
+func (r *Registry) SetOnGoEdit(hook func(path string) string) {
+	r.OnGoEdit = hook
 }
 
 func (r *Registry) Definitions() []llm.Tool {
@@ -50,25 +69,74 @@ func (r *Registry) IsMutating(name string) bool {
 	return ok && t.Mutating
 }
 
-func (r *Registry) Execute(name, argsJSON string) (string, error) {
+func (r *Registry) ExecuteStream(ctx context.Context, name, argsJSON string, onLine func(string)) (Result, error) {
 	t, ok := r.tools[name]
 	if !ok {
-		return "", fmt.Errorf("unknown tool %q", name)
+		return Result{}, fmt.Errorf("unknown tool %q", name)
 	}
-	var args map[string]any
-	if argsJSON != "" {
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return "", fmt.Errorf("tool %s: bad arguments: %w", name, err)
-		}
-	}
-	out, err := t.Execute(args)
+	args, err := parseArgs(name, argsJSON)
 	if err != nil {
-		return "", fmt.Errorf("tool %s: %w", name, err)
+		return Result{}, err
 	}
-	if out == "" {
-		out = "(no output)"
+	var res Result
+	if onLine != nil && t.ExecuteStream != nil {
+		res, err = t.ExecuteStream(ctx, args, onLine)
+	} else {
+		res, err = t.Execute(ctx, args)
 	}
-	return out, nil
+	if err != nil {
+		return Result{}, fmt.Errorf("tool %s: %w", name, err)
+	}
+	if res.Output == "" {
+		res.Output = "(no output)"
+	}
+	res.Output += r.goEditDiagnostics(name, args)
+	return res, nil
+}
+
+func (r *Registry) goEditDiagnostics(name string, args map[string]any) string {
+	if name != "write" && name != "edit" {
+		return ""
+	}
+	if r.OnGoEdit == nil {
+		return ""
+	}
+	path := optStr(args, "path")
+	if !strings.HasSuffix(path, ".go") {
+		return ""
+	}
+	return r.OnGoEdit(path)
+}
+
+func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (Result, error) {
+	return r.ExecuteStream(ctx, name, argsJSON, nil)
+}
+
+func (r *Registry) PendingDiff(ctx context.Context, name, argsJSON string) ([]DiffLine, error) {
+	t, ok := r.tools[name]
+	if !ok || t.PendingDiff == nil {
+		return nil, nil
+	}
+	args, err := parseArgs(name, argsJSON)
+	if err != nil {
+		return nil, err
+	}
+	diff, err := t.PendingDiff(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: %w", name, err)
+	}
+	return diff, nil
+}
+
+func parseArgs(name, argsJSON string) (map[string]any, error) {
+	var args map[string]any
+	if argsJSON == "" {
+		return nil, nil
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return nil, fmt.Errorf("tool %s: bad arguments: %w", name, err)
+	}
+	return args, nil
 }
 
 func str(args map[string]any, key string) (string, error) {

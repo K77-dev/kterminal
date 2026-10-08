@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/x/ansi"
 )
 
 //go:embed markdown.json
@@ -47,11 +48,30 @@ func renderMarkdown(md string, width int, dark bool) string {
 	return strings.TrimRight(out, "\n")
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
+func wrapContent(s string, width int) string {
+	if width < 1 || strings.TrimSpace(s) == "" {
 		return s
 	}
-	return s[:n] + "…"
+	return ansi.Wrap(s, width, "/\\_.,:;)")
+}
+
+func indentLines(s string, n int) string {
+	if s == "" || n <= 0 {
+		return s
+	}
+	pad := strings.Repeat(" ", n)
+	return pad + strings.ReplaceAll(s, "\n", "\n"+pad)
+}
+
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	return string(runes[:n-1]) + "…"
 }
 
 func firstLine(s string, n int) string {

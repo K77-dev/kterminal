@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"kterminal/internal/catalog"
@@ -21,7 +22,12 @@ type Router interface {
 	Route(ctx context.Context, state string, candidates []catalog.Model) (Decision, error)
 }
 
-const MinConfidence = 0.5
+func MinConfidence(candidates int) float64 {
+	if candidates < 1 {
+		candidates = 1
+	}
+	return math.Min(0.5, math.Max(0.3, 2.0/float64(candidates)))
+}
 
 const instructions = "Which LLM should handle this development step? Weigh quality, cost and tokens-per-second according to what the step needs: hard reasoning or complex refactors justify expensive strong models; routine tool steps, lookups and simple edits should use fast cheap models. Avoid overkill."
 
@@ -86,7 +92,7 @@ func (r *HeuristicRouter) Route(_ context.Context, state string, candidates []ca
 		if strings.Contains(s, kw) {
 			for _, name := range []string{"glm-5.3", "deepseek-v4-pro"} {
 				if d, ok := pick(name); ok {
-					d.Reason = "heuristic: " + kw
+					d.Reason = "keyword: " + kw
 					return d, nil
 				}
 			}
@@ -103,8 +109,8 @@ func (r *HeuristicRouter) Route(_ context.Context, state string, candidates []ca
 		}
 	}
 	if d, ok := pick(r.Default); ok {
-		d.Reason = "heuristic: default"
+		d.Reason = "default"
 		return d, nil
 	}
-	return Decision{Model: candidates[0].Name, Confidence: 0.3, Router: "heuristic", Reason: "heuristic: first candidate"}, nil
+	return Decision{Model: candidates[0].Name, Confidence: 0.3, Router: "heuristic", Reason: "first candidate"}, nil
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,19 +35,19 @@ func readTool() Tool {
 				},
 			},
 		},
-		Execute: func(args map[string]any) (string, error) {
+		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
 			path, err := str(args, "path")
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			if len(data) > maxReadBytes {
-				return string(data[:maxReadBytes]) + "\n... (truncated)", nil
+				return Result{Output: string(data[:maxReadBytes]) + "\n... (truncated)"}, nil
 			}
-			return string(data), nil
+			return Result{Output: string(data)}, nil
 		},
 	}
 }
@@ -69,23 +70,23 @@ func globTool() Tool {
 				},
 			},
 		},
-		Execute: func(args map[string]any) (string, error) {
+		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
 			pattern, err := str(args, "pattern")
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			matches, err := filepath.Glob(pattern)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			sort.Strings(matches)
 			if len(matches) > maxGlobResults {
 				matches = matches[:maxGlobResults]
 			}
 			if len(matches) == 0 {
-				return "no matches", nil
+				return Result{Output: "no matches"}, nil
 			}
-			return strings.Join(matches, "\n"), nil
+			return Result{Output: strings.Join(matches, "\n")}, nil
 		},
 	}
 }
@@ -109,14 +110,14 @@ func grepTool() Tool {
 				},
 			},
 		},
-		Execute: func(args map[string]any) (string, error) {
+		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
 			pattern, err := str(args, "pattern")
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			root := optStr(args, "path")
 			if root == "" {
@@ -125,12 +126,12 @@ func grepTool() Tool {
 			var out []string
 			info, err := os.Stat(root)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			if !info.IsDir() {
 				lines, err := grepFile(re, root)
 				if err != nil {
-					return "", err
+					return Result{}, err
 				}
 				out = lines
 			} else {
@@ -153,7 +154,7 @@ func grepTool() Tool {
 					return nil
 				})
 				if err != nil {
-					return "", err
+					return Result{}, err
 				}
 			}
 			if len(out) > maxGrepResults {
@@ -161,9 +162,9 @@ func grepTool() Tool {
 				out = append(out, "... (truncated)")
 			}
 			if len(out) == 0 {
-				return "no matches", nil
+				return Result{Output: "no matches"}, nil
 			}
-			return strings.Join(out, "\n"), nil
+			return Result{Output: strings.Join(out, "\n")}, nil
 		},
 	}
 }
@@ -205,26 +206,44 @@ func writeTool() Tool {
 				},
 			},
 		},
-		Execute: func(args map[string]any) (string, error) {
+		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
 			path, err := str(args, "path")
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			content, err := str(args, "content")
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
+			existing, _ := os.ReadFile(path)
 			if dir := filepath.Dir(path); dir != "." {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
-					return "", err
+					return Result{}, err
 				}
 			}
 			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-				return "", err
+				return Result{}, err
 			}
-			return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+			return Result{
+				Output: fmt.Sprintf("wrote %d bytes to %s", len(content), path),
+				Diff:   LineDiff(string(existing), content),
+			}, nil
 		},
+		PendingDiff: pendingWriteDiff,
 	}
+}
+
+func pendingWriteDiff(ctx context.Context, args map[string]any) ([]DiffLine, error) {
+	path, err := str(args, "path")
+	if err != nil {
+		return nil, err
+	}
+	content, err := str(args, "content")
+	if err != nil {
+		return nil, err
+	}
+	existing, _ := os.ReadFile(path)
+	return LineDiff(string(existing), content), nil
 }
 
 func editTool() Tool {
@@ -247,35 +266,70 @@ func editTool() Tool {
 				},
 			},
 		},
-		Execute: func(args map[string]any) (string, error) {
-			path, err := str(args, "path")
+		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
+			path, oldStr, newStr, err := editParams(args)
 			if err != nil {
-				return "", err
-			}
-			oldStr, err := str(args, "old_string")
-			if err != nil {
-				return "", err
-			}
-			newStr, err := str(args, "new_string")
-			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
-			count := strings.Count(string(data), oldStr)
-			if count == 0 {
-				return "", fmt.Errorf("old_string not found in %s", path)
+			out, err := applyEdit(data, path, oldStr, newStr)
+			if err != nil {
+				return Result{}, err
 			}
-			if count > 1 {
-				return "", fmt.Errorf("old_string appears %d times in %s; provide more context", count, path)
-			}
-			out := strings.Replace(string(data), oldStr, newStr, 1)
 			if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-				return "", err
+				return Result{}, err
 			}
-			return fmt.Sprintf("edited %s", path), nil
+			return Result{
+				Output: fmt.Sprintf("edited %s", path),
+				Diff:   LineDiff(string(data), out),
+			}, nil
 		},
+		PendingDiff: pendingEditDiff,
 	}
+}
+
+func pendingEditDiff(ctx context.Context, args map[string]any) ([]DiffLine, error) {
+	path, oldStr, newStr, err := editParams(args)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	simulated, err := applyEdit(data, path, oldStr, newStr)
+	if err != nil {
+		return nil, err
+	}
+	return LineDiff(string(data), simulated), nil
+}
+
+func editParams(args map[string]any) (path, oldStr, newStr string, err error) {
+	path, err = str(args, "path")
+	if err != nil {
+		return "", "", "", err
+	}
+	oldStr, err = str(args, "old_string")
+	if err != nil {
+		return "", "", "", err
+	}
+	newStr, err = str(args, "new_string")
+	if err != nil {
+		return "", "", "", err
+	}
+	return path, oldStr, newStr, nil
+}
+
+func applyEdit(data []byte, path, oldStr, newStr string) (string, error) {
+	count := strings.Count(string(data), oldStr)
+	if count == 0 {
+		return "", fmt.Errorf("old_string not found in %s", path)
+	}
+	if count > 1 {
+		return "", fmt.Errorf("old_string appears %d times in %s; provide more context", count, path)
+	}
+	return strings.Replace(string(data), oldStr, newStr, 1), nil
 }

@@ -1,5 +1,6 @@
 models:
   - name: deepseek-v4-flash
+    vision: false
     description: Fastest and cheapest model, good for quick lookups, simple edits and boilerplate
     strengths: speed and cost; short answers, simple file edits, formatting, running routine tool steps
     input_price_per_m: 0.30
@@ -8,6 +9,7 @@ models:
     context_window: 128000
     tags: [fast, cheap, simple]
   - name: deepseek-v4.1-flash
+    vision: false
     description: Newer flash generation, slightly better quality than v4-flash at similar cost
     strengths: fast routine coding steps, quick explanations, light refactors
     input_price_per_m: 0.30
@@ -16,6 +18,7 @@ models:
     context_window: 128000
     tags: [fast, cheap]
   - name: deepseek-v4-pro
+    vision: false
     description: DeepSeek flagship with strong reasoning, competitive price
     strengths: complex debugging, algorithmic work, multi-file reasoning
     input_price_per_m: 2.50
@@ -24,6 +27,7 @@ models:
     context_window: 128000
     tags: [reasoning, code]
   - name: glm-5.1
+    vision: false
     description: Previous-generation GLM, reliable generalist at low price
     strengths: general coding help, documentation, straightforward tasks
     input_price_per_m: 0.50
@@ -32,6 +36,7 @@ models:
     context_window: 200000
     tags: [cheap, general]
   - name: glm-5.2
+    vision: false
     description: Balanced mid-tier GLM, good quality per dollar
     strengths: everyday feature work, tests, moderate refactors
     input_price_per_m: 1.00
@@ -40,6 +45,7 @@ models:
     context_window: 200000
     tags: [balanced]
   - name: glm-5.3
+    vision: true
     description: Strongest GLM generation, best for hard problems
     strengths: architecture, complex refactors, tricky bugs, long-context work
     input_price_per_m: 2.00
@@ -48,6 +54,7 @@ models:
     context_window: 200000
     tags: [quality, reasoning, long-context]
   - name: us.anthropic.claude-opus-4-7
+    vision: false
     description: Claude Opus 4.7, top-tier quality at premium price
     strengths: hardest reasoning, long agentic tasks, nuanced code review
     input_price_per_m: 15.00

@@ -35,11 +35,68 @@ type FuncCall struct {
 	Arguments string `json:"arguments"`
 }
 
+type ImageURL struct {
+	URL string `json:"url,omitempty"`
+}
+
+type ContentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content"`
+	ContentParts []ContentPart `json:"-"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	if len(m.ContentParts) == 0 {
+		type plain Message
+		return json.Marshal(plain(m))
+	}
+	return json.Marshal(struct {
+		Role       string        `json:"role"`
+		Content    []ContentPart `json:"content"`
+		ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+		ToolCallID string        `json:"tool_call_id,omitempty"`
+	}{
+		Role:       m.Role,
+		Content:    m.ContentParts,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	})
+}
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var raw struct {
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  []ToolCall      `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Role = raw.Role
+	m.ToolCalls = raw.ToolCalls
+	m.ToolCallID = raw.ToolCallID
+	m.Content = ""
+	m.ContentParts = nil
+	content := bytes.TrimSpace(raw.Content)
+	if len(content) == 0 {
+		return nil
+	}
+	if content[0] == '[' {
+		return json.Unmarshal(content, &m.ContentParts)
+	}
+	return json.Unmarshal(content, &m.Content)
 }
 
 type Usage struct {

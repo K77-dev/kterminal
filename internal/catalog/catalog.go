@@ -20,6 +20,9 @@ type Model struct {
 	TPSEstimate     float64  `yaml:"tps_estimate" json:"tps_estimate"`
 	ContextWindow   int      `yaml:"context_window" json:"context_window"`
 	Tags            []string `yaml:"tags" json:"tags"`
+	Vision          bool     `yaml:"vision"`
+	MeasuredTPS     float64
+	MeasuredSamples int
 }
 
 type fileCatalog struct {
@@ -87,8 +90,12 @@ func (m Model) Cost(inputTokens, outputTokens int64) float64 {
 }
 
 func (m Model) Criteria() string {
+	speed := fmt.Sprintf("Speed: ~%.0f tok/s.", m.TPSEstimate)
+	if m.MeasuredTPS > 0 {
+		speed = fmt.Sprintf("Speed: ~%.0f tok/s (measured over %d calls).", m.MeasuredTPS, m.MeasuredSamples)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s — %s. Strengths: %s. Price: $%.2f/M input, $%.2f/M output. Speed: ~%.0f tok/s. Context: %d tokens.",
-		m.Name, m.Description, m.Strengths, m.InputPricePerM, m.OutputPricePerM, m.TPSEstimate, m.ContextWindow)
+	fmt.Fprintf(&b, "%s — %s. Strengths: %s. Price: $%.2f/M input, $%.2f/M output. %s Context: %d tokens.",
+		m.Name, m.Description, m.Strengths, m.InputPricePerM, m.OutputPricePerM, speed, m.ContextWindow)
 	return b.String()
 }
