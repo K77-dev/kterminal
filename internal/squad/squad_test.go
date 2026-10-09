@@ -235,7 +235,7 @@ func TestValidateKickoffClampsMaxConvocations(t *testing.T) {
 	}
 }
 
-func TestValidateKickoffClampsTokenBudget(t *testing.T) {
+func TestValidateKickoffKeepsTokenBudgetAboveLimit(t *testing.T) {
 	s := Load()
 	limits := DefaultLimits()
 	k := Kickoff{Roles: []string{"architect"}, MaxConvocations: 4, TokenBudget: 999999999}
@@ -243,8 +243,8 @@ func TestValidateKickoffClampsTokenBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateKickoff: %v", err)
 	}
-	if result.TokenBudget != limits.TokenBudget {
-		t.Errorf("expected TokenBudget clamped to %d, got %d", limits.TokenBudget, result.TokenBudget)
+	if result.TokenBudget != 999999999 {
+		t.Errorf("expected TokenBudget preserved as declared (advisory), got %d", result.TokenBudget)
 	}
 }
 

@@ -45,9 +45,6 @@ func ValidateKickoff(k Kickoff, store *Store, limits Limits) (Kickoff, error) {
 	if k.TokenBudget <= 0 {
 		k.TokenBudget = limits.TokenBudget
 	}
-	if k.TokenBudget > limits.TokenBudget {
-		k.TokenBudget = limits.TokenBudget
-	}
 	if k.ExitCriterion == "" {
 		k.ExitCriterion = "all personas agree on the plan"
 	}

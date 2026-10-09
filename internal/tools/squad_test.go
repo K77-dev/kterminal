@@ -94,7 +94,7 @@ func TestSquadKickoffToolRejectsUnknownRole(t *testing.T) {
 	}
 }
 
-func TestSquadKickoffToolClampsLimits(t *testing.T) {
+func TestSquadKickoffToolClampsConvocationsKeepsBudget(t *testing.T) {
 	store := squad.Load()
 	limits := squad.DefaultLimits()
 	var got *squad.Kickoff
@@ -111,8 +111,8 @@ func TestSquadKickoffToolClampsLimits(t *testing.T) {
 	if got.MaxConvocations != limits.MaxConvocations {
 		t.Errorf("MaxConvocations = %d, want clamped to %d", got.MaxConvocations, limits.MaxConvocations)
 	}
-	if got.TokenBudget != limits.TokenBudget {
-		t.Errorf("TokenBudget = %d, want clamped to %d", got.TokenBudget, limits.TokenBudget)
+	if got.TokenBudget != 999999999 {
+		t.Errorf("TokenBudget = %d, want preserved as declared (advisory)", got.TokenBudget)
 	}
 }
 

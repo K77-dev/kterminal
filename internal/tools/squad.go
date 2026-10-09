@@ -17,7 +17,7 @@ func SquadKickoffTool(store *squad.Store, limits squad.Limits, register func(squ
 			Type: "function",
 			Function: llm.Function{
 				Name:        SquadKickoffToolName,
-				Description: "Register the squad mesa (roles, limits and exit criterion) before any persona convocation. The Go layer validates roles and clamps the limits to the configured maxima.",
+				Description: "Register the squad mesa (roles, limits and exit criterion) before any persona convocation. The Go layer validates roles, clamps max_convocations to the configured maximum and defaults the token budget. The token budget is advisory only: it never blocks or ends the mesa.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -27,7 +27,7 @@ func SquadKickoffTool(store *squad.Store, limits squad.Limits, register func(squ
 							"items":       map[string]any{"type": "string"},
 						},
 						"max_convocations": map[string]any{"type": "integer", "description": "Maximum number of convocations for the mesa"},
-						"token_budget":     map[string]any{"type": "integer", "description": "Token budget for the entire mesa"},
+						"token_budget":     map[string]any{"type": "integer", "description": "Advisory token budget for the entire mesa (informational only; never blocks convocations)"},
 						"exit_criterion":   map[string]any{"type": "string", "description": "Binary condition that signals convergence"},
 					},
 					"required": []string{"roles"},
