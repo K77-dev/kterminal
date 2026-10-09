@@ -549,6 +549,22 @@ func TestNewStatusError(t *testing.T) {
 	}
 }
 
+func TestIsRateLimited(t *testing.T) {
+	wrapped := fmt.Errorf("chat stream failed after 3 attempts (model m): %w", &statusError{code: http.StatusTooManyRequests, status: "429 Too Many Requests", body: "{}"})
+	if !IsRateLimited(wrapped) {
+		t.Fatal("wrapped 429 must be detected as a rate limit")
+	}
+	if IsRateLimited(fmt.Errorf("wrap: %w", &statusError{code: http.StatusInternalServerError, status: "500", body: "{}"})) {
+		t.Fatal("500 is not a rate limit")
+	}
+	if IsRateLimited(errors.New("boom")) {
+		t.Fatal("generic error is not a rate limit")
+	}
+	if IsRateLimited(nil) {
+		t.Fatal("nil is not a rate limit")
+	}
+}
+
 func TestBackoffDuration(t *testing.T) {
 	client := New("https://host", "key", false)
 	client.retryBase = time.Second

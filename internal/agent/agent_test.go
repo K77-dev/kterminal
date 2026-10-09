@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4423,6 +4424,36 @@ func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
 	}
 }
 
+func TestConvokePersonaNotBlockedByPreKickoffExploration(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{contentChunks("architect contribution", 10, 2)}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+
+	ag.turnTokens = 5000
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000})
+
+	if got := ag.Mesa().Tokens; got != 0 {
+		t.Fatalf("mesa tokens right after kickoff = %d, want 0 (pre-kickoff exploration is the baseline, not mesa consumption)", got)
+	}
+	if ag.mesaTokenBase != 5000 {
+		t.Fatalf("mesa token baseline = %d, want 5000 captured at kickoff", ag.mesaTokenBase)
+	}
+
+	text, err := ag.convokePersona(context.Background(), "architect", "review", "")
+	if err != nil {
+		t.Fatalf("convocation must proceed past the budget check (mesa budget counts consumption from the kickoff onward): %v", err)
+	}
+	if !strings.Contains(text, "architect contribution") {
+		t.Fatalf("convocation text = %q, want the persona contribution", text)
+	}
+	entry := mesaEntryByName(t, ag.Mesa(), "architect")
+	if entry.Status != squad.StatusDone {
+		t.Fatalf("architect status = %q, want done after the convocation", entry.Status)
+	}
+}
+
 func TestSquadKickoffToolRegistered(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachSquad(squad.Load())
@@ -4539,6 +4570,90 @@ func TestConvocationsAccumulateIntoTokenBudget(t *testing.T) {
 	}
 }
 
+func TestChatStreamRateLimitFallsBackToNextModel(t *testing.T) {
+	var mu sync.Mutex
+	var served []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", modelsHandler(t))
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		served = append(served, body.Model)
+		mu.Unlock()
+		if body.Model == "deepseek-v4-flash" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"Too many requests, the rate limit is 60000 tokens per minute","type":"throttling_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range contentChunks("fallback answer", 10, 2) {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	gw := httptest.NewServer(mux)
+	t.Cleanup(gw.Close)
+
+	jevMux := http.NewServeMux()
+	jevMux.HandleFunc("POST /v1/systemone", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"model": "jev-test",
+			"answers": map[string]any{
+				"model_choice": map[string]any{
+					"type":          "choice",
+					"choice":        "deepseek-v4-flash",
+					"confidence":    0.6,
+					"probabilities": map[string]float64{"deepseek-v4-flash": 0.6, "glm-5.2": 0.4},
+				},
+			},
+		})
+	})
+	jevSrv := httptest.NewServer(jevMux)
+	t.Cleanup(jevSrv.Close)
+
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.Run("hello")
+	events := collectParentTurnEvents(t, ag)
+
+	mu.Lock()
+	got := append([]string(nil), served...)
+	mu.Unlock()
+	want := []string{"deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v4-flash", "glm-5.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("served models = %v, want %v (3 rate-limited attempts then the next best model)", got, want)
+	}
+
+	var done Event
+	fallbackRoutes := 0
+	for _, e := range events {
+		if e.Kind == EventRoute && e.Model == "glm-5.2" {
+			fallbackRoutes++
+			if e.Reason != "rate limited, next best model" {
+				t.Fatalf("fallback route reason = %q, want the rate-limit reason", e.Reason)
+			}
+		}
+		if e.Kind == EventTurnDone && e.Depth == 0 {
+			done = e
+		}
+	}
+	if fallbackRoutes != 1 {
+		t.Fatalf("fallback route events = %d, want 1", fallbackRoutes)
+	}
+	if done.Model != "glm-5.2" {
+		t.Fatalf("turn_done model = %q, want glm-5.2", done.Model)
+	}
+	if !strings.Contains(done.Text, "fallback answer") {
+		t.Fatalf("turn text = %q, want the fallback answer", done.Text)
+	}
+}
+
 func TestTaskToolPersonaWithoutKickoffFailsInline(t *testing.T) {
 	var calls []chatCall
 	gw := taskFlowGateway(t, [][]string{
@@ -4608,4 +4723,794 @@ func ruleNames(rules []kspec.Rule) []string {
 		out[i] = r.Name
 	}
 	return out
+}
+
+func kickoffArgs(roles ...string) string {
+	return mustJSON(map[string]any{
+		"roles":            roles,
+		"max_convocations": 4,
+		"token_budget":     100000,
+		"exit_criterion":   "all agree",
+	})
+}
+
+func personaTaskArgs(persona, description string) string {
+	return mustJSON(map[string]any{"description": description, "persona": persona})
+}
+
+func glmCost(t *testing.T, prompt, completion int64) float64 {
+	t.Helper()
+	m, ok := testCatalog(t).Get("glm-5.3")
+	if !ok {
+		t.Fatalf("glm-5.3 not in catalog")
+	}
+	return m.Cost(prompt, completion)
+}
+
+func mesaEntryByName(t *testing.T, m *squad.Mesa, name string) squad.MesaEntry {
+	t.Helper()
+	for _, e := range m.Entries {
+		if e.Name == name {
+			return e
+		}
+	}
+	t.Fatalf("mesa has no entry %q: %+v", name, m.Entries)
+	return squad.MesaEntry{}
+}
+
+func newSquadAgent(t *testing.T, gwURL, jevURL string, sess *session.Writer) *Agent {
+	t.Helper()
+	ag := newTestAgent(t, gwURL, jevURL, sess, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	return ag
+}
+
+func waitForEventMatch(t *testing.T, ch chan Event, match func(Event) bool) Event {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case e := <-ch:
+			if e.Kind == EventError {
+				t.Fatalf("unexpected error event: %s", e.Text)
+			}
+			if match(e) {
+				return e
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a matching event")
+		}
+	}
+}
+
+type callGate struct {
+	arrived chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newCallGate() *callGate {
+	return &callGate{arrived: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *callGate) await(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the gated call to arrive")
+	}
+}
+
+func (g *callGate) open() {
+	g.once.Do(func() { close(g.release) })
+}
+
+func gatedTaskFlowGateway(t *testing.T, responses [][]string, gates map[int]*callGate) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", modelsHandler(t))
+	var call int
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		idx := call
+		call++
+		if idx >= len(responses) {
+			t.Errorf("unexpected chat call %d", idx)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if g, ok := gates[idx]; ok {
+			close(g.arrived)
+			<-g.release
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range responses[idx] {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		for _, g := range gates {
+			g.open()
+		}
+	})
+	return srv
+}
+
+func TestSquadMesaFullCycle(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(notes, []byte("backend notes\n"), 0o644); err != nil {
+		t.Fatalf("setup notes: %v", err)
+	}
+	gates := map[int]*callGate{
+		1: newCallGate(),
+		2: newCallGate(),
+		3: newCallGate(),
+		4: newCallGate(),
+		5: newCallGate(),
+		6: newCallGate(),
+	}
+	gw := gatedTaskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect", "backend")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "review the design")),
+		contentChunks("architect contribution", 10, 2),
+		toolCallChunks("call_2", taskToolName, personaTaskArgs("backend", "assess the implementation")),
+		toolCallChunks("sub_b", "read", fmt.Sprintf(`{"path":%s}`, mustJSON(notes))),
+		contentChunks("backend contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, gates)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, nil)
+
+	m := ag.Mesa()
+	if m == nil {
+		t.Fatal("Mesa() = nil after activating squad mode, want an empty initialized mesa")
+	}
+	if len(m.Entries) != 0 {
+		t.Fatalf("pre-kickoff entries = %+v, want none", m.Entries)
+	}
+
+	ag.Run("design the squad feature")
+
+	gates[1].await(t)
+	arch, err := squad.Load().Resolve("architect")
+	if err != nil {
+		t.Fatalf("resolve architect: %v", err)
+	}
+	back, err := squad.Load().Resolve("backend")
+	if err != nil {
+		t.Fatalf("resolve backend: %v", err)
+	}
+	m = ag.Mesa()
+	if !reflect.DeepEqual(m.Roles, []string{"architect", "backend"}) {
+		t.Fatalf("roles = %v, want [architect backend]", m.Roles)
+	}
+	if m.MaxConvocations != 4 || m.TokenBudget != 100000 {
+		t.Fatalf("ceilings = %d/%d, want 4/100000 from the kickoff", m.MaxConvocations, m.TokenBudget)
+	}
+	if m.Convocations != 0 || m.Tokens != 0 {
+		t.Fatalf("counters = %d/%d, want 0/0 right after kickoff (mesa consumption starts at the kickoff baseline)", m.Convocations, m.Tokens)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("entries = %+v, want 2 in kickoff order", m.Entries)
+	}
+	for _, e := range m.Entries {
+		if e.Status != squad.StatusWaiting {
+			t.Fatalf("entry %q status = %q, want waiting after kickoff", e.Name, e.Status)
+		}
+	}
+	if got := mesaEntryByName(t, m, "architect"); got.Discipline != arch.Discipline {
+		t.Fatalf("architect discipline = %q, want %q resolved from the store", got.Discipline, arch.Discipline)
+	}
+	if got := mesaEntryByName(t, m, "backend"); got.Discipline != back.Discipline {
+		t.Fatalf("backend discipline = %q, want %q resolved from the store", got.Discipline, back.Discipline)
+	}
+	gates[1].open()
+
+	gates[2].await(t)
+	m = ag.Mesa()
+	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDeliberating {
+		t.Fatalf("architect status = %q, want deliberating during its convocation", got.Status)
+	}
+	if got := mesaEntryByName(t, m, "backend"); got.Status != squad.StatusWaiting {
+		t.Fatalf("backend status = %q, want waiting during the architect convocation", got.Status)
+	}
+	if m.Convocations != 1 {
+		t.Fatalf("convocations = %d, want 1 mid-convocation", m.Convocations)
+	}
+	if m.Tokens != 15 || m.Tokens != ag.turnTokens-ag.mesaTokenBase {
+		t.Fatalf("tokens = %d, want 15 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	}
+	gates[2].open()
+
+	gates[3].await(t)
+	archCost := glmCost(t, 10, 2)
+	subDone := waitForDepthEvent(t, ag.Events, EventTurnDone, 1)
+	if subDone.Agent != "architect" {
+		t.Fatalf("nested turn_done agent = %q, want architect", subDone.Agent)
+	}
+	if subDone.Model != "glm-5.3" {
+		t.Fatalf("nested turn_done model = %q, want glm-5.3", subDone.Model)
+	}
+	if subDone.TurnTokens != 12 {
+		t.Fatalf("nested turn_done TurnTokens = %d, want 12", subDone.TurnTokens)
+	}
+	if subDone.SessionCost != archCost {
+		t.Fatalf("nested turn_done SessionCost = %v, want %v", subDone.SessionCost, archCost)
+	}
+	m = ag.Mesa()
+	archEntry := mesaEntryByName(t, m, "architect")
+	if archEntry.Status != squad.StatusDone {
+		t.Fatalf("architect status = %q, want done after its contribution", archEntry.Status)
+	}
+	if archEntry.Model != "glm-5.3" || archEntry.Tokens != 12 || archEntry.Cost != archCost {
+		t.Fatalf("architect entry = %+v, want glm-5.3 with 12 tokens and cost %v", archEntry, archCost)
+	}
+	if m.Convocations != 1 || m.Tokens != 27 {
+		t.Fatalf("counters = %d/%d, want 1/27 after the first convocation", m.Convocations, m.Tokens)
+	}
+	gates[3].open()
+
+	gates[4].await(t)
+	m = ag.Mesa()
+	if got := mesaEntryByName(t, m, "backend"); got.Status != squad.StatusDeliberating {
+		t.Fatalf("backend status = %q, want deliberating during its convocation", got.Status)
+	}
+	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDone {
+		t.Fatalf("architect status = %q, want done during the backend convocation", got.Status)
+	}
+	if m.Convocations != 2 {
+		t.Fatalf("convocations = %d, want 2 during the second convocation", m.Convocations)
+	}
+	gates[4].open()
+
+	gates[5].await(t)
+	bashCost := glmCost(t, 10, 5)
+	subToolStart := waitForDepthEvent(t, ag.Events, EventToolStart, 1)
+	if subToolStart.Agent != "backend" || subToolStart.Tool != "read" {
+		t.Fatalf("nested tool_start = %q/%q, want backend/read", subToolStart.Agent, subToolStart.Tool)
+	}
+	if subToolStart.TurnTokens != 15 {
+		t.Fatalf("nested tool_start TurnTokens = %d, want 15", subToolStart.TurnTokens)
+	}
+	if subToolStart.SessionCost != bashCost {
+		t.Fatalf("nested tool_start SessionCost = %v, want %v", subToolStart.SessionCost, bashCost)
+	}
+	m = ag.Mesa()
+	backEntry := mesaEntryByName(t, m, "backend")
+	if backEntry.Status != squad.StatusDeliberating {
+		t.Fatalf("backend status = %q, want deliberating while its tool runs", backEntry.Status)
+	}
+	if backEntry.Tokens != 15 || backEntry.Cost != bashCost {
+		t.Fatalf("backend entry = %+v, want live metrics 15 tokens and cost %v", backEntry, bashCost)
+	}
+	if m.Tokens != 42 || m.Tokens != ag.turnTokens-ag.mesaTokenBase {
+		t.Fatalf("tokens = %d, want 42 equal to mesa consumption (turnTokens %d - base %d; subagent tokens in flight only land at its return)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	}
+	gates[5].open()
+
+	gates[6].await(t)
+	backendCost := glmCost(t, 10, 2)
+	subDone = waitForDepthEvent(t, ag.Events, EventTurnDone, 1)
+	if subDone.Agent != "backend" {
+		t.Fatalf("second nested turn_done agent = %q, want backend", subDone.Agent)
+	}
+	if subDone.TurnTokens != 27 {
+		t.Fatalf("nested turn_done TurnTokens = %d, want 27 (15 + 12 cumulative)", subDone.TurnTokens)
+	}
+	if subDone.SessionCost != bashCost+backendCost {
+		t.Fatalf("nested turn_done SessionCost = %v, want %v", subDone.SessionCost, bashCost+backendCost)
+	}
+	m = ag.Mesa()
+	backEntry = mesaEntryByName(t, m, "backend")
+	if backEntry.Status != squad.StatusDone {
+		t.Fatalf("backend status = %q, want done after its contribution", backEntry.Status)
+	}
+	if backEntry.Tokens != 27 || backEntry.Cost != bashCost+backendCost {
+		t.Fatalf("backend entry = %+v, want 27 tokens and cost %v", backEntry, bashCost+backendCost)
+	}
+	if m.Tokens != 69 {
+		t.Fatalf("tokens = %d, want 69 after the second convocation", m.Tokens)
+	}
+	gates[6].open()
+
+	done := waitForDepthEvent(t, ag.Events, EventTurnDone, 0)
+	if done.TurnTokens != 105 {
+		t.Fatalf("parent turn_done TurnTokens = %d, want 105", done.TurnTokens)
+	}
+	m = ag.Mesa()
+	for _, e := range m.Entries {
+		if e.Status != squad.StatusDone {
+			t.Fatalf("entry %q status = %q, want done at convergence", e.Name, e.Status)
+		}
+	}
+	if m.Tokens != ag.turnTokens-ag.mesaTokenBase || m.Tokens != 90 {
+		t.Fatalf("mesa tokens = %d, want 90 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	}
+	if m.Convocations != ag.turnConvocations || m.Convocations != 2 {
+		t.Fatalf("mesa convocations = %d, want 2 equal to turnConvocations %d", m.Convocations, ag.turnConvocations)
+	}
+
+	waitTurnIdle(t, ag)
+	if err := ag.ActivateMode("sdd"); err != nil {
+		t.Fatalf("activate sdd: %v", err)
+	}
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	m = ag.Mesa()
+	if len(m.Entries) != 2 || m.Tokens != 90 || m.Convocations != 2 {
+		t.Fatalf("mesa after the mode toggle = %d/%d with %d entries, want the converged state preserved", m.Tokens, m.Convocations, len(m.Entries))
+	}
+
+	ag.Reset()
+	m = ag.Mesa()
+	if m.Tokens != 0 || m.Convocations != 0 {
+		t.Fatalf("mesa counters after Reset = %d/%d, want 0/0 mirroring the turn counters", m.Tokens, m.Convocations)
+	}
+	if ag.turnTokens != 0 || ag.turnConvocations != 0 || ag.mesaTokenBase != 0 {
+		t.Fatalf("turn counters after Reset = %d/%d (base %d), want 0/0/0", ag.turnTokens, ag.turnConvocations, ag.mesaTokenBase)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("entries after Reset = %d, want 2 preserved", len(m.Entries))
+	}
+}
+
+func TestNestedEventsCarryCumulativeMetrics(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_1", taskToolName, `{"description":"run a quick command"}`),
+		toolCallChunks("sub_1", "bash", `{"command":"echo nested"}`),
+		contentChunks("nested subagent done", 10, 2),
+		contentChunks("parent wrapped up", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachTaskTool()
+
+	ag.Run("delegate a command run")
+
+	parentToolStart := waitForEventMatch(t, ag.Events, func(e Event) bool {
+		return e.Depth == 0 && e.Kind == EventToolStart
+	})
+	if parentToolStart.TurnTokens != 15 {
+		t.Fatalf("parent tool_start TurnTokens = %d, want 15", parentToolStart.TurnTokens)
+	}
+	if parentToolStart.SessionCost != glmCost(t, 10, 5) {
+		t.Fatalf("parent tool_start SessionCost = %v, want %v", parentToolStart.SessionCost, glmCost(t, 10, 5))
+	}
+
+	subToolStart := waitForDepthEvent(t, ag.Events, EventToolStart, 1)
+	if subToolStart.TurnTokens != 15 {
+		t.Fatalf("nested tool_start TurnTokens = %d, want 15", subToolStart.TurnTokens)
+	}
+	if subToolStart.SessionCost != glmCost(t, 10, 5) {
+		t.Fatalf("nested tool_start SessionCost = %v, want %v", subToolStart.SessionCost, glmCost(t, 10, 5))
+	}
+	if subToolStart.TurnTokens <= 0 || subToolStart.SessionCost <= 0 {
+		t.Fatalf("nested tool_start cumulatives must be > 0: %+v", subToolStart)
+	}
+
+	subDone := waitForDepthEvent(t, ag.Events, EventTurnDone, 1)
+	wantSubCost := glmCost(t, 10, 5) + glmCost(t, 10, 2)
+	if subDone.TurnTokens != 27 {
+		t.Fatalf("nested turn_done TurnTokens = %d, want 27 (15 + 12 cumulative)", subDone.TurnTokens)
+	}
+	if subDone.SessionCost != wantSubCost {
+		t.Fatalf("nested turn_done SessionCost = %v, want %v", subDone.SessionCost, wantSubCost)
+	}
+	if subDone.TurnTokens <= 0 || subDone.SessionCost <= 0 {
+		t.Fatalf("nested turn_done cumulatives must be > 0: %+v", subDone)
+	}
+
+	parentDone := waitForDepthEvent(t, ag.Events, EventTurnDone, 0)
+	if parentDone.TurnTokens != 63 {
+		t.Fatalf("parent turn_done TurnTokens = %d, want 63 (own 36 + subagent 27)", parentDone.TurnTokens)
+	}
+	if parentDone.SessionCost <= 0 {
+		t.Fatalf("parent turn_done SessionCost = %v, want > 0", parentDone.SessionCost)
+	}
+}
+
+func TestSecondConvocationAccumulatesOverBaseline(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "first pass")),
+		contentChunks("first contribution", 10, 2),
+		toolCallChunks("call_2", taskToolName, personaTaskArgs("architect", "second pass")),
+		contentChunks("second contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, nil)
+
+	ag.Run("iterate on the design")
+
+	first := waitForDepthEvent(t, ag.Events, EventTurnDone, 1)
+	if first.TurnTokens != 12 {
+		t.Fatalf("first nested turn_done TurnTokens = %d, want 12", first.TurnTokens)
+	}
+	m := ag.Mesa()
+	if got := mesaEntryByName(t, m, "architect"); got.Tokens != 12 {
+		t.Fatalf("architect tokens after the first convocation = %d, want 12", got.Tokens)
+	}
+
+	second := waitForDepthEvent(t, ag.Events, EventTurnDone, 1)
+	if second.TurnTokens != 12 {
+		t.Fatalf("second nested turn_done TurnTokens = %d, want 12 (fresh subagent cumulative)", second.TurnTokens)
+	}
+	m = ag.Mesa()
+	archCost := glmCost(t, 10, 2)
+	if got := mesaEntryByName(t, m, "architect"); got.Tokens != 24 || got.Cost != archCost+archCost {
+		t.Fatalf("architect entry = %+v, want 24 tokens and cost %v accumulated over the first baseline", got, archCost+archCost)
+	}
+
+	collectParentTurnEvents(t, ag)
+	m = ag.Mesa()
+	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDone {
+		t.Fatalf("architect status = %q, want done after two convocations", got.Status)
+	}
+	if m.Convocations != 2 || m.Convocations != ag.turnConvocations {
+		t.Fatalf("convocations = %d, want 2 equal to turnConvocations %d", m.Convocations, ag.turnConvocations)
+	}
+	if m.Tokens != ag.turnTokens-ag.mesaTokenBase || m.Tokens != 75 {
+		t.Fatalf("mesa tokens = %d, want 75 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	}
+}
+
+func TestSquadMesaAbortMarksDeliberatingDone(t *testing.T) {
+	var calls []chatCall
+	gw := subagentBlockGateway(t, 2, "subagent partial work", [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "review the design")),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	sess := newSessionWriter(t)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, sess)
+
+	ag.Run("design then abort")
+	waitForEventMatch(t, ag.Events, func(e Event) bool { return e.Kind == EventKickoff })
+	waitForDepthEvent(t, ag.Events, EventDelta, 1)
+
+	m := ag.Mesa()
+	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDeliberating {
+		t.Fatalf("architect status = %q, want deliberating mid-convocation", got.Status)
+	}
+	if m.Convocations != 1 {
+		t.Fatalf("convocations = %d, want 1 mid-convocation", m.Convocations)
+	}
+
+	ag.Cancel()
+	waitForDepthEvent(t, ag.Events, EventTurnAborted, 1)
+	waitForDepthEvent(t, ag.Events, EventTurnAborted, 0)
+
+	m = ag.Mesa()
+	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDone {
+		t.Fatalf("architect status = %q, want done after the aborted convocation", got.Status)
+	}
+	if m.Tokens != ag.turnTokens-ag.mesaTokenBase {
+		t.Fatalf("mesa tokens = %d, want %d equal to mesa consumption after the abort", m.Tokens, ag.turnTokens-ag.mesaTokenBase)
+	}
+
+	var snapshot map[string]any
+	for _, ev := range transcriptLines(t, sess) {
+		if ev["type"] == "snapshot" {
+			snapshot = ev
+		}
+	}
+	if snapshot == nil {
+		t.Fatal("no snapshot after the aborted turn")
+	}
+	mesaJSON, ok := snapshot["mesa"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot has no mesa: %+v", snapshot)
+	}
+	if mesaJSON["convocations"] != float64(1) || mesaJSON["tokens"] != float64(15) {
+		t.Fatalf("snapshot mesa counters = %v/%v, want 1/15", mesaJSON["convocations"], mesaJSON["tokens"])
+	}
+	entries, ok := mesaJSON["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("snapshot mesa entries = %v, want 1", mesaJSON["entries"])
+	}
+	entry, _ := entries[0].(map[string]any)
+	if entry["name"] != "architect" || entry["status"] != squad.StatusDone {
+		t.Fatalf("snapshot mesa entry = %v, want architect done", entry)
+	}
+}
+
+func TestMesaRestoreRoundTrip(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	if ag.Mesa() != nil {
+		t.Fatal("Mesa() on a fresh agent = non-nil, want nil")
+	}
+
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	m := ag.Mesa()
+	if m == nil {
+		t.Fatal("Mesa() = nil after activating squad, want an empty initialized mesa")
+	}
+	if len(m.Entries) != 0 || m.Tokens != 0 || m.Convocations != 0 {
+		t.Fatalf("initialized mesa = %+v, want empty", m)
+	}
+
+	original := &squad.Mesa{}
+	original.Reset(
+		squad.Kickoff{Roles: []string{"architect", "backend"}, MaxConvocations: 4, TokenBudget: 100000},
+		map[string]string{"architect": "architecture", "backend": "backend"},
+	)
+	original.AddConvocation()
+	original.AddTokens(500)
+	original.StartDeliberation("architect")
+	original.ObservePersona("architect", "glm-5.3", 120, 0.75)
+	original.FinishDeliberation("architect")
+	wantEntries := append([]squad.MesaEntry(nil), original.Entries...)
+
+	ag.RestoreMesa(original)
+	restored := ag.Mesa()
+	if restored == nil {
+		t.Fatal("Mesa() = nil after RestoreMesa")
+	}
+	if restored == original {
+		t.Fatal("Mesa() returned the restored pointer, want an isolated copy")
+	}
+	if !reflect.DeepEqual(restored.Entries, wantEntries) {
+		t.Fatalf("restored entries = %+v, want %+v", restored.Entries, wantEntries)
+	}
+	if !reflect.DeepEqual(restored.Roles, original.Roles) {
+		t.Fatalf("restored roles = %v, want %v", restored.Roles, original.Roles)
+	}
+	if restored.MaxConvocations != 4 || restored.TokenBudget != 100000 {
+		t.Fatalf("restored ceilings = %d/%d, want 4/100000", restored.MaxConvocations, restored.TokenBudget)
+	}
+	if restored.Convocations != 1 || restored.Tokens != 500 {
+		t.Fatalf("restored counters = %d/%d, want 1/500", restored.Convocations, restored.Tokens)
+	}
+
+	original.AddTokens(999)
+	original.StartDeliberation("backend")
+	if restored.Tokens != 500 {
+		t.Fatalf("restored tokens = %d, want 500 (mutating the source must not leak in)", restored.Tokens)
+	}
+	if got := mesaEntryByName(t, restored, "backend"); got.Status != squad.StatusWaiting {
+		t.Fatalf("restored backend status = %q, want waiting (source mutation must not leak in)", got.Status)
+	}
+
+	restored.AddTokens(1)
+	again := ag.Mesa()
+	if again == restored {
+		t.Fatal("Mesa() returned the previous copy, want a fresh clone per call")
+	}
+	if again.Tokens != 500 {
+		t.Fatalf("agent mesa tokens = %d, want 500 (mutating a returned copy must not leak in)", again.Tokens)
+	}
+
+	ag.RestoreMesa(nil)
+	if ag.Mesa() == nil {
+		t.Fatal("RestoreMesa(nil) dropped the mesa, want the restored state kept")
+	}
+
+	if err := ag.ActivateMode("sdd"); err != nil {
+		t.Fatalf("activate sdd: %v", err)
+	}
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	if got := ag.Mesa(); got.Tokens != 500 || len(got.Entries) != 2 {
+		t.Fatalf("mesa after the mode toggle = %+v, want the restored state preserved", got)
+	}
+}
+
+func TestSquadMesaConcurrentReadWrite(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect", "backend")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "review the design")),
+		contentChunks("architect contribution", 10, 2),
+		toolCallChunks("call_2", taskToolName, personaTaskArgs("backend", "assess the implementation")),
+		contentChunks("backend contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if m := ag.Mesa(); m != nil {
+					_ = m.Tokens + int64(m.Convocations) + int64(len(m.Entries))
+				}
+			}
+		}
+	}()
+
+	ag.Run("design the squad feature")
+	collectParentTurnEvents(t, ag)
+	close(stop)
+	wg.Wait()
+
+	m := ag.Mesa()
+	if m.Tokens != ag.turnTokens-ag.mesaTokenBase {
+		t.Fatalf("mesa tokens = %d, want %d equal to mesa consumption after concurrent access", m.Tokens, ag.turnTokens-ag.mesaTokenBase)
+	}
+	if m.Convocations != ag.turnConvocations {
+		t.Fatalf("mesa convocations = %d, want %d equal to turnConvocations after concurrent access", m.Convocations, ag.turnConvocations)
+	}
+	if m.Tokens != 75 || m.Convocations != 2 {
+		t.Fatalf("mesa counters = %d/%d, want 75/2", m.Tokens, m.Convocations)
+	}
+}
+
+func TestSnapshotCarriesMesa(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "review the design")),
+		contentChunks("architect contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	sess := newSessionWriter(t)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, sess)
+
+	ag.Run("design the squad feature")
+	collectParentTurnEvents(t, ag)
+
+	var snapshot map[string]any
+	for _, ev := range transcriptLines(t, sess) {
+		if ev["type"] == "snapshot" {
+			snapshot = ev
+		}
+	}
+	if snapshot == nil {
+		t.Fatal("no snapshot event in transcript")
+	}
+	if snapshot["mode"] != "squad" {
+		t.Fatalf("snapshot mode = %v, want squad", snapshot["mode"])
+	}
+	mesaJSON, ok := snapshot["mesa"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot line has no mesa field: %+v", snapshot)
+	}
+	if mesaJSON["convocations"] != float64(1) {
+		t.Fatalf("snapshot mesa convocations = %v, want 1", mesaJSON["convocations"])
+	}
+	if mesaJSON["tokens"] != float64(48) {
+		t.Fatalf("snapshot mesa tokens = %v, want 48", mesaJSON["tokens"])
+	}
+	entries, ok := mesaJSON["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("snapshot mesa entries = %v, want 1", mesaJSON["entries"])
+	}
+	entry, _ := entries[0].(map[string]any)
+	if entry["name"] != "architect" || entry["status"] != squad.StatusDone {
+		t.Fatalf("snapshot mesa entry = %v, want architect done", entry)
+	}
+	if entry["model"] != "glm-5.3" || entry["tokens"] != float64(12) {
+		t.Fatalf("snapshot mesa entry metrics = %v, want glm-5.3 with 12 tokens", entry)
+	}
+	if entry["cost"] != glmCost(t, 10, 2) {
+		t.Fatalf("snapshot mesa entry cost = %v, want %v", entry["cost"], glmCost(t, 10, 2))
+	}
+
+	snap, err := session.Load(sess.Path())
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if snap.Mesa == nil {
+		t.Fatal("Load returned no mesa from the snapshot")
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("loaded mode = %q, want squad", snap.Mode)
+	}
+	m := ag.Mesa()
+	if !reflect.DeepEqual(snap.Mesa.Roles, m.Roles) {
+		t.Fatalf("loaded roles = %v, want %v", snap.Mesa.Roles, m.Roles)
+	}
+	if !reflect.DeepEqual(snap.Mesa.Entries, m.Entries) {
+		t.Fatalf("loaded entries = %+v, want %+v", snap.Mesa.Entries, m.Entries)
+	}
+	if snap.Mesa.Tokens != m.Tokens || snap.Mesa.Convocations != m.Convocations {
+		t.Fatalf("loaded counters = %d/%d, want %d/%d", snap.Mesa.Tokens, snap.Mesa.Convocations, m.Tokens, m.Convocations)
+	}
+	if snap.Mesa.MaxConvocations != m.MaxConvocations || snap.Mesa.TokenBudget != m.TokenBudget {
+		t.Fatalf("loaded ceilings = %d/%d, want %d/%d", snap.Mesa.MaxConvocations, snap.Mesa.TokenBudget, m.MaxConvocations, m.TokenBudget)
+	}
+}
+
+func TestSquadResumeLoadLatestRestoresMesa(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, kickoffArgs("architect")),
+		toolCallChunks("call_1", taskToolName, personaTaskArgs("architect", "review the design")),
+		contentChunks("architect contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+		contentChunks("summary answer", 10, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	sess := newSessionWriter(t)
+	ag := newSquadAgent(t, gw.URL, jevSrv.URL, sess)
+
+	ag.Run("design the squad feature")
+	collectParentTurnEvents(t, ag)
+
+	live := ag.Mesa()
+	if len(live.Entries) != 1 || live.Entries[0].Status != squad.StatusDone || live.Tokens != 48 || live.Convocations != 1 {
+		t.Fatalf("live mesa = %+v, want architect done with 48 tokens and 1 convocation", live)
+	}
+
+	sess.Close()
+	path, snap, err := session.LoadLatest()
+	if err != nil {
+		t.Fatalf("load latest: %v", err)
+	}
+	if path != sess.Path() {
+		t.Fatalf("resumed path = %s, want %s", path, sess.Path())
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("resumed mode = %q, want squad", snap.Mode)
+	}
+	if snap.Mesa == nil {
+		t.Fatal("resumed mesa = nil, want the persisted mesa")
+	}
+	if !reflect.DeepEqual(snap.Mesa, live) {
+		t.Fatalf("resumed mesa = %+v, want the live mesa %+v", snap.Mesa, live)
+	}
+
+	aw, err := session.AppendWriter(path)
+	if err != nil {
+		t.Fatalf("append writer: %v", err)
+	}
+	t.Cleanup(func() { aw.Close() })
+	resumed := newSquadAgent(t, gw.URL, jevSrv.URL, aw)
+	resumed.SetMessages(snap.Messages)
+	resumed.RestoreMesa(snap.Mesa)
+
+	restored := resumed.Mesa()
+	if !reflect.DeepEqual(restored, snap.Mesa) {
+		t.Fatalf("restored mesa = %+v, want %+v", restored, snap.Mesa)
+	}
+
+	resumed.Run("summarize the plan")
+	collectParentTurnEvents(t, resumed)
+
+	snap2, err := session.Load(path)
+	if err != nil {
+		t.Fatalf("reload after the follow-up turn: %v", err)
+	}
+	if snap2.Mesa == nil {
+		t.Fatal("follow-up snapshot lost the mesa")
+	}
+	if !reflect.DeepEqual(snap2.Mesa.Entries, snap.Mesa.Entries) {
+		t.Fatalf("follow-up snapshot entries = %+v, want the restored entries %+v", snap2.Mesa.Entries, snap.Mesa.Entries)
+	}
+	if !reflect.DeepEqual(snap2.Mesa.Roles, snap.Mesa.Roles) ||
+		snap2.Mesa.MaxConvocations != snap.Mesa.MaxConvocations ||
+		snap2.Mesa.TokenBudget != snap.Mesa.TokenBudget {
+		t.Fatalf("follow-up snapshot mesa header = %+v, want the restored header", snap2.Mesa)
+	}
+	if snap2.Mesa.Convocations != 0 || snap2.Mesa.Tokens != 11 {
+		t.Fatalf("follow-up snapshot counters = %d/%d, want 0/11 reset for the new turn", snap2.Mesa.Convocations, snap2.Mesa.Tokens)
+	}
 }

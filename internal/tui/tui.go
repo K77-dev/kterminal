@@ -117,12 +117,13 @@ type Model struct {
 
 	pendingUserQueue []string
 
-	currentModel   string
-	routerInfo     string
-	sessionCost    float64
-	lastTPS        float64
-	busy           bool
-	subagentActive bool
+	currentModel    string
+	routerInfo      string
+	sessionCost     float64
+	lastTPS         float64
+	busy            bool
+	subagentActive  bool
+	personaActivity map[string]string
 
 	cfgInputs []textinput.Model
 	cfgFocus  int
@@ -299,15 +300,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.width > 6 {
-			m.mdWidth = m.width - 6
-		}
-		if w := m.width - 2*chatInset - 5; w > 0 {
-			m.input.MaxWidth = w
-			m.input.SetWidth(w)
-		}
+		m.fitChatColumn()
 		m.fitPromptHeight()
-		m.vp = viewport.New(maxInt(msg.Width-2*chatInset, 1), m.viewportHeight())
+		m.vp = viewport.New(maxInt(m.chatWidth()-2*chatInset, 1), m.viewportHeight())
 		if m.ask != nil {
 			m.ask.text.Width = maxInt(msg.Width-14, 20)
 		}
@@ -416,6 +411,9 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		line := indentLines(compactionStyle.Render(fmt.Sprintf("⚡ context compacted (%s → %s tokens)", formatTokensK(e.TokensBefore), formatTokensK(e.TokensAfter))), statusIndent)
 		m.blocks = append(m.blocks, line)
 		m.refreshContent()
+	case agent.EventKickoff:
+		m.personaActivity = nil
+		m.refreshContent()
 	case agent.EventDelta:
 		m.stream.WriteString(e.Text)
 		m.currentModel = e.Model
@@ -500,6 +498,12 @@ func (m *Model) handleNestedEvent(e agent.Event) {
 		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("⚡ %s · %s %.2f", e.Model, e.Router, e.Confidence)), statusIndent))
 	case agent.EventToolStart:
 		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("● %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent))
+		if e.Agent != "" {
+			if m.personaActivity == nil {
+				m.personaActivity = make(map[string]string)
+			}
+			m.personaActivity[e.Agent] = fmt.Sprintf("%s(%s)", e.Tool, firstLine(e.Args, 100))
+		}
 	case agent.EventToolResult:
 		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+"  "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent))
 	case agent.EventConfirm:
@@ -775,6 +779,24 @@ func (m *Model) handlePromptContentChange(before string) {
 	m.histIdx = -1
 	m.fitPromptHeight()
 	m.fitViewportHeight()
+}
+
+func (m Model) chatWidth() int {
+	return m.width - m.sidebarWidth()
+}
+
+func (m *Model) fitChatColumn() {
+	w := m.chatWidth()
+	if w > 6 {
+		m.mdWidth = w - 6
+	}
+	if iw := w - 2*chatInset - 5; iw > 0 {
+		m.input.MaxWidth = iw
+		m.input.SetWidth(iw)
+	}
+	if vw := maxInt(w-2*chatInset, 1); m.vp.Width != vw {
+		m.vp.Width = vw
+	}
 }
 
 func (m *Model) fitPromptHeight() {
@@ -1381,6 +1403,7 @@ func (m Model) emptyState() string {
 }
 
 func (m Model) hintBar() string {
+	width := m.chatWidth()
 	left := ""
 	if m.busy {
 		if m.subagentActive {
@@ -1389,7 +1412,7 @@ func (m Model) hintBar() string {
 			left = m.spin.View() + helpStyle.Render(" Thinking")
 		}
 	} else {
-		left = helpStyle.Render(truncate(m.cwd, maxInt(m.width/3, 20)))
+		left = helpStyle.Render(truncate(m.cwd, maxInt(width/3, 20)))
 	}
 
 	right := ""
@@ -1425,7 +1448,7 @@ func (m Model) hintBar() string {
 		right += helpStyle.Render(fmt.Sprintf(" · %.0f tok/s", m.lastTPS))
 	}
 
-	gap := m.width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
+	gap := width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
@@ -1451,6 +1474,15 @@ func (m Model) View() string {
 	case stateAsk:
 		return m.askView()
 	}
+	chat := m.chatView()
+	width := m.sidebarWidth()
+	if width <= 0 {
+		return chat
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, chat, m.sidebarView(width))
+}
+
+func (m Model) chatView() string {
 	prompt := indentLines(promptBoxStyle.Render(m.input.View()), chatInset)
 	corner := strings.Repeat(" ", chatInset) + fadeCornerStyle.Render("╹")
 	var b strings.Builder

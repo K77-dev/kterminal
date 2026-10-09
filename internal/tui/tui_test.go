@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/llm"
 	"kterminal/internal/session"
+	"kterminal/internal/squad"
 	"kterminal/internal/tools"
 )
 
@@ -2559,5 +2561,1067 @@ func TestAskUserTurnFlow(t *testing.T) {
 	}
 	if m.state != stateChat {
 		t.Fatalf("state = %q, want chat", m.state)
+	}
+}
+
+func nextAgentEvent(t *testing.T, ch chan agent.Event) agent.Event {
+	t.Helper()
+	select {
+	case e := <-ch:
+		if e.Kind == agent.EventError {
+			t.Fatalf("unexpected error event: %s", e.Text)
+		}
+		return e
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for agent event")
+	}
+	return agent.Event{}
+}
+
+func legacyHintBar(m Model) string {
+	left := ""
+	if m.busy {
+		if m.subagentActive {
+			left = m.spin.View() + helpStyle.Render(" subagent running")
+		} else {
+			left = m.spin.View() + helpStyle.Render(" Thinking")
+		}
+	} else {
+		left = helpStyle.Render(truncate(m.cwd, maxInt(m.width/3, 20)))
+	}
+
+	right := ""
+	if m.copyFlash != "" {
+		right += successStyle.Render(m.copyFlash) + helpStyle.Render(" · ")
+	}
+	if !m.follow {
+		right += warningStyle.Render("↑ scrolled") + helpStyle.Render(" · end to jump · ")
+	}
+	if m.busy {
+		right += warningStyle.Render("esc to interrupt") + helpStyle.Render(" · ")
+	}
+	right += textStyle.Render("?") + helpStyle.Render(" commands")
+	if m.resumedCount > 0 {
+		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d mensagens", m.resumedCount))
+	}
+	if s := m.agent.ActiveSkill(); s != "" {
+		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
+	}
+	if m.agent.Mode() == "squad" {
+		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
+	}
+	if p := m.agent.Pinned(); p != "" {
+		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
+	}
+	if m.currentModel != "" {
+		right += helpStyle.Render(" · ") + textStyle.Render(m.currentModel)
+	}
+	if m.sessionCost > 0 {
+		right += helpStyle.Render(" · " + formatCost(m.sessionCost))
+	}
+	if m.lastTPS > 0 {
+		right += helpStyle.Render(fmt.Sprintf(" · %.0f tok/s", m.lastTPS))
+	}
+
+	gap := m.width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return strings.Repeat(" ", chatInset) + left + strings.Repeat(" ", gap) + right
+}
+
+func legacyChatView(m Model) string {
+	prompt := indentLines(promptBoxStyle.Render(m.input.View()), chatInset)
+	corner := strings.Repeat(" ", chatInset) + fadeCornerStyle.Render("╹")
+	var b strings.Builder
+	b.WriteString(indentLines(m.vp.View(), chatInset))
+	b.WriteString("\n\n")
+	for _, w := range m.mentionWarnings {
+		b.WriteString(indentLines(warningStyle.Render(w), chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.mentionPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.commandPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.modePopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if chips := renderAttachmentChips(m.pendingAttachments); chips != "" {
+		b.WriteString(indentLines(chips, chatInset))
+		b.WriteString("\n")
+	}
+	b.WriteString(prompt)
+	b.WriteString("\n")
+	b.WriteString(corner)
+	b.WriteString("\n")
+	b.WriteString(legacyHintBar(m))
+	return b.String()
+}
+
+func assertViewMatchesLegacy(t *testing.T, m Model, label string) {
+	t.Helper()
+	got := m.View()
+	want := legacyChatView(m)
+	if got != want {
+		t.Fatalf("%s view diverged from the pre-sidebar fixture:\ngot:  %q\nwant: %q", label, got, want)
+	}
+}
+
+func TestSDDViewByteIdenticalToPreSidebar(t *testing.T) {
+	m := newTestModel(t, WithResumed(resumedFixture(3)))
+	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	m.cwd = "/fixed/cwd"
+	m.blocks = append(m.blocks, userBlock("pergunta do usuário", nil))
+	m.blocks = append(m.blocks, indentLines(toolStyle.Render("● bash(ls)"), statusIndent))
+	m.mentionWarnings = []string{"max 5 file mentions"}
+	m.pendingAttachments = []attachment{{name: "shot.png", size: 7, dataURI: "data:image/png;base64,x"}}
+	m.copyFlash = "✓ copied 12 chars"
+	m.follow = false
+	m.currentModel = "glm-5.3"
+	m.sessionCost = 0.0123
+	m.lastTPS = 88
+	m.busy = true
+	m.subagentActive = true
+	m.agent.SetPinned("glm-5.3")
+	m.openModePopup()
+	m.refreshContent()
+	assertViewMatchesLegacy(t, m, "sdd busy")
+
+	m.busy = false
+	m.subagentActive = false
+	assertViewMatchesLegacy(t, m, "sdd idle")
+
+	fresh := newTestModel(t)
+	fresh = step(t, fresh, tea.WindowSizeMsg{Width: 80, Height: 24})
+	assertViewMatchesLegacy(t, fresh, "sdd empty")
+
+	narrowSquad := newSquadModel(t, 80)
+	assertViewMatchesLegacy(t, narrowSquad, "squad below the sidebar threshold")
+}
+
+func TestSidebarVisibilityMatrix(t *testing.T) {
+	for _, width := range []int{80, 100, 140, 200} {
+		sdd := newTestModel(t)
+		sdd = step(t, sdd, tea.WindowSizeMsg{Width: width, Height: 30})
+		if strings.Contains(stripANSI(sdd.View()), "maestro") {
+			t.Fatalf("sdd view at %d cols must never render the sidebar", width)
+		}
+		if got := lipgloss.Width(sdd.View()); got != width-chatInset {
+			t.Fatalf("sdd view width at %d cols = %d, want %d (full chat span)", width, got, width-chatInset)
+		}
+
+		sq := newSquadModel(t, width)
+		plain := stripANSI(sq.View())
+		if width < sidebarMinTerminalWidth {
+			if strings.Contains(plain, "maestro") {
+				t.Fatalf("squad view at %d cols must omit the sidebar", width)
+			}
+			if got := lipgloss.Width(sq.View()); got != width-chatInset {
+				t.Fatalf("squad view width at %d cols = %d, want %d (full chat span)", width, got, width-chatInset)
+			}
+			continue
+		}
+		if !strings.Contains(plain, "maestro") {
+			t.Fatalf("squad view at %d cols missing the sidebar", width)
+		}
+		if !strings.Contains(plain, "mesa not started") {
+			t.Fatalf("squad sidebar at %d cols missing the idle mesa state:\n%s", width, plain)
+		}
+		if got := lipgloss.Width(sq.View()); got != width-chatInset {
+			t.Fatalf("squad view width at %d cols = %d, want %d (chat + sidebar)", width, got, width-chatInset)
+		}
+	}
+}
+
+func TestSidebarClampDerivesChatColumn(t *testing.T) {
+	cases := []struct {
+		terminal int
+		sidebar  int
+	}{
+		{100, 24},
+		{140, 35},
+		{200, 40},
+	}
+	for _, c := range cases {
+		m := newSquadModel(t, c.terminal)
+		if got := m.sidebarWidth(); got != c.sidebar {
+			t.Fatalf("sidebarWidth() at %d cols = %d, want %d", c.terminal, got, c.sidebar)
+		}
+		if got := m.vp.Width; got != c.terminal-c.sidebar-2*chatInset {
+			t.Fatalf("vp.Width at %d cols = %d, want %d (chat column)", c.terminal, got, c.terminal-c.sidebar-2*chatInset)
+		}
+		if got := lipgloss.Width(m.View()); got != c.terminal-chatInset {
+			t.Fatalf("view width at %d cols = %d, want %d (chat + sidebar)", c.terminal, got, c.terminal-chatInset)
+		}
+	}
+}
+
+func TestSidebarResizeKeepsPanelsIntact(t *testing.T) {
+	m := newSquadModel(t, 80)
+	m.blocks = append(m.blocks, userBlock("squad plan question", nil))
+	m.blocks = append(m.blocks, indentLines(toolStyle.Render("● bash(ls)"), statusIndent))
+	m.agent.RestoreMesa(&squad.Mesa{
+		Roles:           []string{"architect"},
+		MaxConvocations: 4,
+		TokenBudget:     100000,
+		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDeliberating}},
+	})
+	m.refreshContent()
+
+	steps := []struct {
+		width   int
+		sidebar int
+	}{
+		{80, 0},
+		{120, 29},
+		{200, 40},
+	}
+	for _, s := range steps {
+		m = step(t, m, tea.WindowSizeMsg{Width: s.width, Height: 30})
+		view := m.View()
+		if got := lipgloss.Width(view); got != s.width-chatInset {
+			t.Fatalf("resize to %d: view width = %d, want %d", s.width, got, s.width-chatInset)
+		}
+		for i, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > s.width {
+				t.Fatalf("resize to %d: line %d overflows at %d cols:\n%q", s.width, i, got, line)
+			}
+		}
+		plain := stripANSI(view)
+		if !strings.Contains(plain, "squad plan question") {
+			t.Fatalf("resize to %d: chat content lost:\n%s", s.width, plain)
+		}
+		if !strings.Contains(plain, "● bash(ls)") {
+			t.Fatalf("resize to %d: tool line lost:\n%s", s.width, plain)
+		}
+		if s.sidebar == 0 {
+			if strings.Contains(plain, "maestro") {
+				t.Fatalf("resize to %d: sidebar must stay hidden", s.width)
+			}
+			continue
+		}
+		if !strings.Contains(plain, "maestro") {
+			t.Fatalf("resize to %d: sidebar header lost:\n%s", s.width, plain)
+		}
+		if !strings.Contains(plain, "architect · deliberating") {
+			t.Fatalf("resize to %d: sidebar persona lost:\n%s", s.width, plain)
+		}
+		if got := m.vp.Width; got != s.width-s.sidebar-2*chatInset {
+			t.Fatalf("resize to %d: vp.Width = %d, want %d", s.width, got, s.width-s.sidebar-2*chatInset)
+		}
+	}
+}
+
+func TestKickoffClearsPersonaActivity(t *testing.T) {
+	m := newSquadModel(t, 200)
+	m.agent.RegisterKickoff(squad.Kickoff{Roles: []string{"architect", "qa"}, MaxConvocations: 4, TokenBudget: 100000})
+	m.personaActivity = map[string]string{"architect": "bash(npm test)"}
+	blocksBefore := len(m.blocks)
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventKickoff, Text: "mesa: roles=[architect qa]"}})
+
+	if len(m.personaActivity) != 0 {
+		t.Fatalf("personaActivity = %v, want cleared by kickoff", m.personaActivity)
+	}
+	if len(m.blocks) != blocksBefore {
+		t.Fatalf("kickoff must not append chat blocks, blocks %d -> %d", blocksBefore, len(m.blocks))
+	}
+	plain := stripANSI(m.View())
+	for _, want := range []string{"architect", "qa", "0/4 convocations"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("panel missing %q after kickoff:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "bash(npm test)") {
+		t.Fatalf("stale activity must not survive kickoff:\n%s", plain)
+	}
+}
+
+func TestNestedToolStartUpdatesPersonaActivity(t *testing.T) {
+	m := newSquadModel(t, 200)
+	m.agent.RestoreMesa(&squad.Mesa{
+		Roles:           []string{"architect", "backend"},
+		MaxConvocations: 4,
+		TokenBudget:     100000,
+		Entries: []squad.MesaEntry{
+			{Name: "architect", Discipline: "architecture", Status: squad.StatusDeliberating},
+			{Name: "backend", Discipline: "backend", Status: squad.StatusWaiting},
+		},
+	})
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolStart, Tool: "read", Args: `{"path":"a.txt"}`, Depth: 1, Agent: "architect"}})
+	if got := m.personaActivity["architect"]; got != `read({"path":"a.txt"})` {
+		t.Fatalf("architect activity = %q, want the live tool", got)
+	}
+	if got := m.personaActivity["backend"]; got != "" {
+		t.Fatalf("backend activity = %q, want empty before its convocation", got)
+	}
+	if plain := stripANSI(m.sidebarView(m.sidebarWidth())); !strings.Contains(plain, `read({"path":"a.txt"})`) {
+		t.Fatalf("sidebar missing the live activity:\n%s", plain)
+	}
+	if full := stripANSI(m.View()); strings.Count(full, `read({"path":"a.txt"})`) != 2 {
+		t.Fatalf("activity must render in chat and sidebar, found %d copies:\n%s", strings.Count(full, `read({"path":"a.txt"})`), full)
+	}
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolStart, Tool: "bash", Args: `{"command":"go test ./..."}`, Depth: 1, Agent: "backend"}})
+	if got := m.personaActivity["backend"]; got != `bash({"command":"go test ./..."})` {
+		t.Fatalf("backend activity = %q, want the live tool", got)
+	}
+	if got := m.personaActivity["architect"]; got != `read({"path":"a.txt"})` {
+		t.Fatalf("architect activity must persist while backend deliberates, got %q", got)
+	}
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventTurnDone, Model: "glm-5.3", Depth: 1, Agent: "architect", TurnTokens: 12, SessionCost: 0.01}})
+	if got := m.personaActivity["architect"]; got != `read({"path":"a.txt"})` {
+		t.Fatalf("concluded persona must keep its last action, got %q", got)
+	}
+	if plain := stripANSI(m.sidebarView(m.sidebarWidth())); !strings.Contains(plain, `read({"path":"a.txt"})`) {
+		t.Fatalf("sidebar must keep the last action of a concluded persona:\n%s", plain)
+	}
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolStart, Tool: "read", Args: `{"path":"b.txt"}`, Depth: 2}})
+	if len(m.personaActivity) != 2 {
+		t.Fatalf("anonymous nested tool_start must not touch personaActivity: %v", m.personaActivity)
+	}
+}
+
+func TestRestoreMesaRebuildsPanelAfterResume(t *testing.T) {
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ag := agent.New(nil, nil, nil, cat, nil, nil, false)
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	ag.RestoreMesa(&squad.Mesa{
+		Roles:           []string{"architect"},
+		MaxConvocations: 4,
+		TokenBudget:     100000,
+		Convocations:    1,
+		Tokens:          5000,
+		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDone, Model: "glm-5.3", Tokens: 5000, Cost: 0.01}},
+	})
+	m := New(ag, &config.Config{}, cat, true)
+	m = step(t, m, tea.WindowSizeMsg{Width: 200, Height: 30})
+
+	plain := stripANSI(m.View())
+	for _, want := range []string{
+		"architect · done",
+		"glm-5.3",
+		"5.0k tok",
+		"$0.0100",
+		"1/4 convocations",
+		"5.0k/100.0k tokens",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("resumed panel missing %q:\n%s", want, plain)
+		}
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("resumed view width = %d, want %d", got, 200-chatInset)
+	}
+
+	legacy := agent.New(nil, nil, nil, cat, nil, nil, false)
+	if err := legacy.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	m2 := New(legacy, &config.Config{}, cat, true)
+	m2 = step(t, m2, tea.WindowSizeMsg{Width: 200, Height: 30})
+	if plain := stripANSI(m2.View()); !strings.Contains(plain, "mesa not started") {
+		t.Fatalf("snapshot without mesa must render the not-started state:\n%s", plain)
+	}
+}
+
+func TestModeSwitchTogglesSidebarWithoutRestart(t *testing.T) {
+	m := newSquadModel(t, 200)
+	if !strings.Contains(stripANSI(m.View()), "maestro") {
+		t.Fatal("sidebar missing in squad mode")
+	}
+	if got := m.vp.Width; got != 200-40-2*chatInset {
+		t.Fatalf("vp.Width = %d, want the chat column", got)
+	}
+
+	m.openModePopup()
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.agent.Mode() != "sdd" {
+		t.Fatalf("mode = %q, want sdd after the popup selection", m.agent.Mode())
+	}
+	plain := stripANSI(m.View())
+	if strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must disappear in sdd:\n%s", plain)
+	}
+	if got := m.vp.Width; got != 200-2*chatInset {
+		t.Fatalf("vp.Width = %d, want the full width restored", got)
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("view width = %d, want %d", got, 200-chatInset)
+	}
+
+	m.openModePopup()
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.agent.Mode() != "squad" {
+		t.Fatalf("mode = %q, want squad after the popup selection", m.agent.Mode())
+	}
+	plain = stripANSI(m.View())
+	if !strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must reappear in squad:\n%s", plain)
+	}
+	if got := m.vp.Width; got != 200-40-2*chatInset {
+		t.Fatalf("vp.Width = %d, want the chat column again", got)
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("view width = %d, want %d", got, 200-chatInset)
+	}
+}
+
+func TestModalsStayFullScreenInSquad(t *testing.T) {
+	ch := make(chan bool, 1)
+	m := newSquadModel(t, 200)
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventConfirm, Tool: "bash", Args: `{"command":"echo hi"}`, ApproveCh: ch}})
+	if m.state != stateConfirm {
+		t.Fatalf("state = %q, want confirm", m.state)
+	}
+	plain := stripANSI(m.View())
+	if strings.Contains(plain, "maestro") {
+		t.Fatalf("confirm popup must render full-width without the sidebar:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Confirm tool execution") {
+		t.Fatalf("confirm popup content missing:\n%s", plain)
+	}
+	if got := lipgloss.Width(m.View()); got > 200 {
+		t.Fatalf("confirm view width = %d, want <= 200", got)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after approval", m.state)
+	}
+	if plain := stripANSI(m.View()); !strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must reappear after the confirm popup:\n%s", plain)
+	}
+
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventAskUser, Questions: wizardQuestions(), AnswerCh: make(chan []string, 1)}})
+	if m.state != stateAsk {
+		t.Fatalf("state = %q, want ask", m.state)
+	}
+	plain = stripANSI(m.View())
+	if strings.Contains(plain, "maestro") {
+		t.Fatalf("ask wizard must render full-width without the sidebar:\n%s", plain)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after the ask wizard", m.state)
+	}
+	if plain := stripANSI(m.View()); !strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must reappear after the ask wizard:\n%s", plain)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/config")})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.state != stateConfig {
+		t.Fatalf("state = %q, want config", m.state)
+	}
+	plain = stripANSI(m.View())
+	if strings.Contains(plain, "maestro") {
+		t.Fatalf("config screen must render full-width without the sidebar:\n%s", plain)
+	}
+	if got := lipgloss.Width(m.View()); got > 200 {
+		t.Fatalf("config view width = %d, want <= 200", got)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after config", m.state)
+	}
+	if plain := stripANSI(m.View()); !strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must reappear after config:\n%s", plain)
+	}
+}
+
+func squadFlowGateway(t *testing.T, responses [][]string, gates map[int]*flowGate) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", gatewayModelsHandler(t))
+	var call int
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		idx := call
+		call++
+		if idx >= len(responses) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if g, ok := gates[idx]; ok {
+			<-g.release
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range responses[idx] {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		for _, g := range gates {
+			g.open()
+		}
+	})
+	return srv
+}
+
+type flowGate struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func newFlowGate() *flowGate {
+	return &flowGate{release: make(chan struct{})}
+}
+
+func (g *flowGate) open() {
+	g.once.Do(func() { close(g.release) })
+}
+
+func TestSquadFlowSidebarIntegration(t *testing.T) {
+	gates := map[int]*flowGate{
+		1: newFlowGate(),
+		2: newFlowGate(),
+	}
+	gw := squadFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskTool, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("architect contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, gates)
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ag := agent.New(llm.New(gw.URL, "gw-key", false), nil, nil, cat, tools.NewRegistry(), nil, false)
+	ag.SetPinned("glm-5.3")
+	ag.AttachSquad(squad.Load())
+	ag.SetSquadPins(map[string]string{"architect": "glm-5.3"})
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+
+	m := New(ag, &config.Config{}, cat, true)
+	m = step(t, m, tea.WindowSizeMsg{Width: 200, Height: 30})
+	m.input.SetValue("design the squad feature")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy {
+		t.Fatal("expected busy=true after enter")
+	}
+
+	archModel, ok := cat.Get("glm-5.3")
+	if !ok {
+		t.Fatal("glm-5.3 not in catalog")
+	}
+	archCost := formatCost(archModel.Cost(10, 2))
+
+	pumpUntil := func(match func(agent.Event) bool) {
+		t.Helper()
+		for {
+			e := nextAgentEvent(t, ag.Events)
+			m = step(t, m, agentEventMsg{event: e})
+			if got := lipgloss.Width(m.View()); got != 200-chatInset {
+				t.Fatalf("event %s: view width = %d, want %d", e.Kind, got, 200-chatInset)
+			}
+			if match(e) {
+				return
+			}
+		}
+	}
+
+	pumpUntil(func(e agent.Event) bool { return e.Kind == agent.EventKickoff })
+	plain := stripANSI(m.View())
+	for _, want := range []string{"architect", "waiting", "0/4 convocations", "0/100.0k tokens"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("panel missing %q right after kickoff:\n%s", want, plain)
+		}
+	}
+	gates[1].open()
+
+	pumpUntil(func(e agent.Event) bool {
+		return e.Kind == agent.EventRoute && e.Depth == 1 && e.Agent == "architect"
+	})
+	plain = stripANSI(m.View())
+	for _, want := range []string{"architect · deliberating", "1/4 convocations", "15/100.0k tokens"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("panel missing %q during the convocation:\n%s", want, plain)
+		}
+	}
+	gates[2].open()
+
+	pumpUntil(func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 1 && e.Agent == "architect"
+	})
+	plain = stripANSI(m.View())
+	for _, want := range []string{"12 tok", archCost} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("panel missing %q on the frame after the nested turn_done:\n%s", want, plain)
+		}
+	}
+
+	pumpUntil(func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 0
+	})
+	plain = stripANSI(m.View())
+	for _, want := range []string{"architect · done", "1/4 convocations", "48/100.0k tokens"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("panel missing %q after the squad turn:\n%s", want, plain)
+		}
+	}
+	if m.busy {
+		t.Fatal("expected busy=false after the squad turn")
+	}
+	if len(m.personaActivity) != 0 {
+		t.Fatalf("persona without tools must leave no activity, got %v", m.personaActivity)
+	}
+}
+
+func pumpUntilEvent(t *testing.T, m Model, ch chan agent.Event, match func(agent.Event) bool) Model {
+	t.Helper()
+	for {
+		e := nextAgentEvent(t, ch)
+		m = step(t, m, agentEventMsg{event: e})
+		if match(e) {
+			return m
+		}
+	}
+}
+
+func mesaEntryStatus(m *squad.Mesa, name string) string {
+	for _, e := range m.Entries {
+		if e.Name == name {
+			return e.Status
+		}
+	}
+	return ""
+}
+
+func lastSnapshotMesa(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	var mesa map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var ev struct {
+			Type string           `json:"type"`
+			Mesa *json.RawMessage `json:"mesa"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal transcript line: %v", err)
+		}
+		if ev.Type != "snapshot" || ev.Mesa == nil {
+			continue
+		}
+		mesa = map[string]any{}
+		if err := json.Unmarshal(*ev.Mesa, &mesa); err != nil {
+			t.Fatalf("unmarshal snapshot mesa: %v", err)
+		}
+	}
+	if mesa == nil {
+		t.Fatal("no snapshot mesa in transcript")
+	}
+	return mesa
+}
+
+func mustFloat(t *testing.T, m map[string]any, key string) float64 {
+	t.Helper()
+	v, ok := m[key].(float64)
+	if !ok {
+		t.Fatalf("mesa field %q missing or not a number: %v", key, m[key])
+	}
+	return v
+}
+
+func mustString(t *testing.T, m map[string]any, key string) string {
+	t.Helper()
+	v, ok := m[key].(string)
+	if !ok {
+		t.Fatalf("mesa field %q missing or not a string: %v", key, m[key])
+	}
+	return v
+}
+
+func newLiveSquadModel(t *testing.T, gwURL string, sess *session.Writer) (Model, *agent.Agent) {
+	t.Helper()
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ag := agent.New(llm.New(gwURL, "gw-key", false), nil, nil, cat, tools.NewRegistry(), sess, false)
+	ag.SetPinned("glm-5.3")
+	ag.AttachSquad(squad.Load())
+	ag.SetSquadPins(map[string]string{"architect": "glm-5.3", "backend": "glm-5.3", "qa": "glm-5.3"})
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	m := New(ag, &config.Config{}, cat, true)
+	m = step(t, m, tea.WindowSizeMsg{Width: 200, Height: 30})
+	return m, ag
+}
+
+func TestResumeContinueRebuildsSquadPanel(t *testing.T) {
+	gw := squadFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskTool, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("architect contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, nil)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	sess, err := session.NewWriter()
+	if err != nil {
+		t.Fatalf("session writer: %v", err)
+	}
+	m, ag := newLiveSquadModel(t, gw.URL, sess)
+
+	m.input.SetValue("design the squad feature")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 0
+	})
+	if m.busy {
+		t.Fatal("expected busy=false after the squad turn")
+	}
+
+	sess.Close()
+	path, snap, err := session.LoadLatest()
+	if err != nil {
+		t.Fatalf("load latest: %v", err)
+	}
+	if path != sess.Path() {
+		t.Fatalf("resumed path = %s, want %s", path, sess.Path())
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("resumed mode = %q, want squad", snap.Mode)
+	}
+	if snap.Mesa == nil {
+		t.Fatal("resumed mesa = nil, want the persisted mesa")
+	}
+
+	mesaRaw := lastSnapshotMesa(t, path)
+	if mesaRaw["tokens"] != float64(snap.Mesa.Tokens) || mesaRaw["convocations"] != float64(snap.Mesa.Convocations) {
+		t.Fatalf("jsonl mesa counters = %v/%v, want %d/%d matching the loaded snapshot", mesaRaw["tokens"], mesaRaw["convocations"], snap.Mesa.Tokens, snap.Mesa.Convocations)
+	}
+	if mesaRaw["max_convocations"] != float64(snap.Mesa.MaxConvocations) || mesaRaw["token_budget"] != float64(snap.Mesa.TokenBudget) {
+		t.Fatalf("jsonl mesa ceilings = %v/%v, want %d/%d", mesaRaw["max_convocations"], mesaRaw["token_budget"], snap.Mesa.MaxConvocations, snap.Mesa.TokenBudget)
+	}
+	entries, ok := mesaRaw["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("jsonl mesa entries = %v, want 1", mesaRaw["entries"])
+	}
+	entry, _ := entries[0].(map[string]any)
+	if entry["name"] != "architect" || entry["status"] != squad.StatusDone {
+		t.Fatalf("jsonl mesa entry = %v, want architect done", entry)
+	}
+
+	resumedCat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	resumedAg := agent.New(llm.New(gw.URL, "gw-key", false), nil, nil, resumedCat, tools.NewRegistry(), nil, false)
+	resumedAg.SetPinned("glm-5.3")
+	resumedAg.AttachSquad(squad.Load())
+	resumedAg.AttachTaskTool()
+	resumedAg.AttachSquadKickoffTool()
+	resumedAg.SetMessages(snap.Messages)
+	if err := resumedAg.ActivateMode(snap.Mode); err != nil {
+		t.Fatalf("activate resumed mode: %v", err)
+	}
+	resumedAg.RestoreMesa(snap.Mesa)
+
+	m2 := New(resumedAg, &config.Config{}, resumedCat, true, WithResumed(snap.Messages))
+	m2 = step(t, m2, tea.WindowSizeMsg{Width: 200, Height: 30})
+
+	panel := stripANSI(m2.sidebarView(m2.sidebarWidth()))
+	wantTokens := formatTokensK(int64(mustFloat(t, mesaRaw, "tokens")))
+	wantBudget := formatTokensK(int64(mustFloat(t, mesaRaw, "token_budget")))
+	wantEntryTokens := formatTokensK(int64(mustFloat(t, entry, "tokens")))
+	for _, want := range []string{
+		"architect · " + mustString(t, entry, "status"),
+		mustString(t, entry, "model"),
+		wantEntryTokens + " tok",
+		formatCost(mustFloat(t, entry, "cost")),
+		fmt.Sprintf("%d/%d convocations", int64(mustFloat(t, mesaRaw, "convocations")), int64(mustFloat(t, mesaRaw, "max_convocations"))),
+		wantTokens + "/" + wantBudget + " tokens",
+	} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("resumed panel missing %q:\n%s", want, panel)
+		}
+	}
+	if strings.Contains(panel, "mesa not started") {
+		t.Fatalf("resumed panel must show the persisted mesa, not the idle state:\n%s", panel)
+	}
+	chat := stripANSI(m2.View())
+	if !strings.Contains(chat, "plan converged") {
+		t.Fatalf("resumed chat missing the persisted conversation:\n%s", chat)
+	}
+	if !strings.Contains(chat, "maestro") {
+		t.Fatalf("resumed view missing the sidebar:\n%s", chat)
+	}
+	if got := lipgloss.Width(m2.View()); got != 200-chatInset {
+		t.Fatalf("resumed view width = %d, want %d", got, 200-chatInset)
+	}
+}
+
+func TestResumePreFeatureSnapshotRendersMesaNotStarted(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	if err := os.MkdirAll(session.Dir(), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	oldLine := `{"type":"snapshot","messages":[{"role":"user","content":"legacy squad session"},{"role":"assistant","content":"old converged plan"}],"skill":"","mode":"squad"}` + "\n"
+	path := filepath.Join(session.Dir(), "20240101-000000.jsonl")
+	if err := os.WriteFile(path, []byte(oldLine), 0o600); err != nil {
+		t.Fatalf("write pre-feature transcript: %v", err)
+	}
+
+	_, snap, err := session.LoadLatest()
+	if err != nil {
+		t.Fatalf("load latest pre-feature snapshot: %v", err)
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("pre-feature snapshot mode = %q, want squad", snap.Mode)
+	}
+	if snap.Mesa != nil {
+		t.Fatalf("pre-feature snapshot mesa = %+v, want nil", snap.Mesa)
+	}
+
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ag := agent.New(nil, nil, nil, cat, nil, nil, false)
+	ag.SetMessages(snap.Messages)
+	if err := ag.ActivateMode(snap.Mode); err != nil {
+		t.Fatalf("activate resumed mode: %v", err)
+	}
+	ag.RestoreMesa(snap.Mesa)
+
+	m := New(ag, &config.Config{}, cat, true, WithResumed(snap.Messages))
+	m = step(t, m, tea.WindowSizeMsg{Width: 200, Height: 30})
+
+	plain := stripANSI(m.View())
+	if !strings.Contains(plain, "mesa not started") {
+		t.Fatalf("pre-feature resume must render the not-started state:\n%s", plain)
+	}
+	if !strings.Contains(plain, "maestro") {
+		t.Fatalf("pre-feature resume missing the sidebar header:\n%s", plain)
+	}
+	if !strings.Contains(plain, "old converged plan") {
+		t.Fatalf("pre-feature resume missing the legacy chat:\n%s", plain)
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("pre-feature resumed view width = %d, want %d", got, 200-chatInset)
+	}
+	panel := stripANSI(m.sidebarView(m.sidebarWidth()))
+	if strings.Contains(panel, "convocations") || strings.Contains(panel, "/") {
+		t.Fatalf("pre-feature mesa must not render a budget footer:\n%s", panel)
+	}
+}
+
+func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
+	gw := squadFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect","backend"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskTool, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("architect contribution", 10, 2),
+		toolCallChunks("call_2", taskTool, `{"description":"assess the implementation","persona":"backend"}`),
+		contentChunks("backend contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+		toolCallChunks("call_3", tools.SquadKickoffToolName, `{"roles":["qa"],"max_convocations":2,"token_budget":50000,"exit_criterion":"qa approves"}`),
+		contentChunks("second plan converged", 20, 1),
+	}, nil)
+	m, ag := newLiveSquadModel(t, gw.URL, nil)
+
+	m.input.SetValue("design the squad feature")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 0
+	})
+
+	panel := stripANSI(m.sidebarView(m.sidebarWidth()))
+	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "75/100.0k tokens"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("panel missing %q after the converged turn:\n%s", want, panel)
+		}
+	}
+	converged := ag.Mesa()
+	if converged.Tokens != 75 || converged.Convocations != 2 || len(converged.Entries) != 2 {
+		t.Fatalf("converged mesa = %+v, want 75 tokens, 2 convocations, 2 entries", converged)
+	}
+
+	m.openModePopup()
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.agent.Mode() != "sdd" {
+		t.Fatalf("mode = %q, want sdd after the popup selection", m.agent.Mode())
+	}
+	plain := stripANSI(m.View())
+	if strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must disappear in sdd:\n%s", plain)
+	}
+	if got := m.vp.Width; got != 200-2*chatInset {
+		t.Fatalf("vp.Width in sdd = %d, want the full width %d", got, 200-2*chatInset)
+	}
+	hidden := ag.Mesa()
+	if hidden.Tokens != converged.Tokens || hidden.Convocations != converged.Convocations || len(hidden.Entries) != len(converged.Entries) {
+		t.Fatalf("mesa corrupted while hidden in sdd: %+v, want %+v", hidden, converged)
+	}
+
+	m.openModePopup()
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.agent.Mode() != "squad" {
+		t.Fatalf("mode = %q, want squad after the popup selection", m.agent.Mode())
+	}
+	plain = stripANSI(m.View())
+	if !strings.Contains(plain, "maestro") {
+		t.Fatalf("sidebar must reappear in squad:\n%s", plain)
+	}
+	panel = stripANSI(m.sidebarView(m.sidebarWidth()))
+	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "75/100.0k tokens"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("mesa not preserved across the mode toggle, missing %q:\n%s", want, panel)
+		}
+	}
+
+	m.input.SetValue("replan with qa alone")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 0
+	})
+
+	panel = stripANSI(m.sidebarView(m.sidebarWidth()))
+	if !strings.Contains(panel, "qa · waiting") {
+		t.Fatalf("rebuilt panel missing the new kickoff role:\n%s", panel)
+	}
+	if strings.Contains(panel, "architect") || strings.Contains(panel, "backend") {
+		t.Fatalf("old personas leaked into the rebuilt mesa:\n%s", panel)
+	}
+	for _, want := range []string{"0/2 convocations", "21/50.0k tokens"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("rebuilt panel missing %q:\n%s", want, panel)
+		}
+	}
+	rebuilt := ag.Mesa()
+	if len(rebuilt.Roles) != 1 || rebuilt.Roles[0] != "qa" {
+		t.Fatalf("rebuilt roles = %v, want [qa]", rebuilt.Roles)
+	}
+	if rebuilt.MaxConvocations != 2 || rebuilt.TokenBudget != 50000 {
+		t.Fatalf("rebuilt ceilings = %d/%d, want 2/50000 from the new kickoff", rebuilt.MaxConvocations, rebuilt.TokenBudget)
+	}
+	if rebuilt.Tokens != 21 || rebuilt.Convocations != 0 {
+		t.Fatalf("rebuilt counters = %d/%d, want 21/0 reset for the new turn", rebuilt.Tokens, rebuilt.Convocations)
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("view width after the rekickoff = %d, want %d", got, 200-chatInset)
+	}
+}
+
+func squadBlockGateway(t *testing.T, responses [][]string, blockAt int, partial string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", gatewayModelsHandler(t))
+	var call int
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		idx := call
+		call++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		if idx == blockAt {
+			chunk := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":%s}}]}`, mustJSON(partial))
+			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			flusher.Flush()
+			<-r.Context().Done()
+			return
+		}
+		if idx >= len(responses) {
+			t.Errorf("unexpected chat call %d", idx)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		for _, c := range responses[idx] {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestSquadEscMidConvocationPanelReflectsFinalState(t *testing.T) {
+	gw := squadBlockGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskTool, `{"description":"review the design","persona":"architect"}`),
+	}, 2, "architect is thinking")
+	m, ag := newLiveSquadModel(t, gw.URL, nil)
+
+	m.input.SetValue("design then abort")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy {
+		t.Fatal("expected busy=true after enter")
+	}
+
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventDelta && e.Depth == 1 && e.Agent == "architect"
+	})
+	panel := stripANSI(m.sidebarView(m.sidebarWidth()))
+	for _, want := range []string{"architect · deliberating", "1/4 convocations"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("panel missing %q mid-convocation:\n%s", want, panel)
+		}
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnAborted && e.Depth == 0
+	})
+	if m.busy {
+		t.Fatal("expected busy=false after esc abort")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if mesaEntryStatus(ag.Mesa(), "architect") == squad.StatusDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("architect never reached done after the abort: %+v", ag.Mesa().Entries)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	panel = stripANSI(m.sidebarView(m.sidebarWidth()))
+	for _, want := range []string{"architect · done", "1/4 convocations", "15/100.0k tokens"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("panel must reflect the final mesa state after esc, missing %q:\n%s", want, panel)
+		}
+	}
+	if got := lipgloss.Width(m.View()); got != 200-chatInset {
+		t.Fatalf("view width after the abort = %d, want %d", got, 200-chatInset)
 	}
 }

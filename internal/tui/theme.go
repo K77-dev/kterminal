@@ -136,6 +136,15 @@ var (
 
 	chipStyle = lipgloss.NewStyle().
 			Foreground(colSecondary)
+
+	sidebarPanelStyle = lipgloss.NewStyle().
+				Border(leftBorder, false, false, false, true).
+				BorderForeground(colBorder).
+				Background(colBgPanel).
+				Padding(0, 1)
+
+	sidebarDividerStyle = lipgloss.NewStyle().
+				Foreground(colBorder)
 )
 
 var disciplineColors = map[string]lipgloss.Color{

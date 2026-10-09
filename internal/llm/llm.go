@@ -368,6 +368,11 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("%s: %s", e.status, e.body)
 }
 
+func IsRateLimited(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusTooManyRequests
+}
+
 func isTransient(err error) bool {
 	if err == nil {
 		return false

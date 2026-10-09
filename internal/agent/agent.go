@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,7 @@ type Event struct {
 	SessionCost   float64
 	TPS           float64
 	Tokens        int64
+	TurnTokens    int64
 	TokensBefore  int64
 	TokensAfter   int64
 	Depth         int
@@ -118,9 +120,11 @@ type Agent struct {
 	userQueue         []string
 	turnConvocations  int
 	turnTokens        int64
+	mesaTokenBase     int64
 	kickoff           *squad.Kickoff
 	squadPins         map[string]string
 	squadLimits       squad.Limits
+	mesa              *squad.Mesa
 }
 
 func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *catalog.Catalog, reg *tools.Registry, sess *session.Writer, confirm bool) *Agent {
@@ -162,6 +166,10 @@ func (a *Agent) Reset() {
 	a.lastEstimateChars = 0
 	a.turnConvocations = 0
 	a.turnTokens = 0
+	a.mesaTokenBase = 0
+	if m := a.currentMesa(); m != nil {
+		m.ResetTurn()
+	}
 	a.ClearSkill()
 }
 
@@ -196,6 +204,9 @@ func (a *Agent) ActivateMode(mode string) error {
 	}
 	a.mode = mode
 	a.rebuildSystemPrompt()
+	if mode == "squad" {
+		a.initMesa()
+	}
 	return nil
 }
 
@@ -215,6 +226,62 @@ func (a *Agent) EnqueueUserMessage(text string) {
 func (a *Agent) RegisterKickoff(k squad.Kickoff) {
 	a.mu.Lock()
 	a.kickoff = &k
+	if a.mesa == nil {
+		a.mesa = &squad.Mesa{}
+	}
+	m := a.mesa
+	a.mesaTokenBase = a.turnTokens
+	a.mu.Unlock()
+	convocations := a.turnConvocations
+	m.Reset(k, a.kickoffDisciplines(k))
+	for i := 0; i < convocations; i++ {
+		m.AddConvocation()
+	}
+}
+
+func (a *Agent) kickoffDisciplines(k squad.Kickoff) map[string]string {
+	if a.squadStore == nil {
+		return nil
+	}
+	disciplines := make(map[string]string, len(k.Roles))
+	for _, role := range k.Roles {
+		p, err := a.squadStore.Resolve(role)
+		if err != nil {
+			continue
+		}
+		disciplines[role] = p.Discipline
+	}
+	return disciplines
+}
+
+func (a *Agent) currentMesa() *squad.Mesa {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mesa
+}
+
+func (a *Agent) initMesa() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.mesa == nil {
+		a.mesa = &squad.Mesa{}
+	}
+}
+
+func (a *Agent) Mesa() *squad.Mesa {
+	m := a.currentMesa()
+	if m == nil {
+		return nil
+	}
+	return m.Clone()
+}
+
+func (a *Agent) RestoreMesa(m *squad.Mesa) {
+	if m == nil {
+		return
+	}
+	a.mu.Lock()
+	a.mesa = m.Clone()
 	a.mu.Unlock()
 }
 
@@ -261,7 +328,7 @@ func (a *Agent) writeSnapshot() {
 	if a.depth > 0 {
 		return
 	}
-	a.Session.WriteSnapshot(a.messages, a.activeSkill, a.mode)
+	a.Session.WriteSnapshot(a.messages, a.activeSkill, a.mode, a.Mesa())
 }
 
 func (a *Agent) Run(userInput string) {
@@ -285,6 +352,11 @@ func (a *Agent) endTurn() {
 	a.mu.Lock()
 	a.turnActive = false
 	a.mu.Unlock()
+	if a.depth == 0 {
+		if m := a.currentMesa(); m != nil {
+			m.FinishTurn()
+		}
+	}
 }
 
 func (a *Agent) turnRunning() bool {
@@ -387,6 +459,11 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 			ev.ParentTool = taskToolName
 			if sub.agentName != "" {
 				ev.Agent = sub.agentName
+				if ev.Kind == EventToolStart || ev.Kind == EventTurnDone {
+					if m := a.currentMesa(); m != nil {
+						m.ObservePersona(sub.agentName, ev.Model, ev.TurnTokens, ev.SessionCost)
+					}
+				}
 			}
 			a.emit(ev)
 		}
@@ -404,6 +481,9 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	}
 	text, err := sub.runLoop(ctx)
 	a.turnTokens += sub.turnTokens
+	if m := a.currentMesa(); m != nil {
+		m.AddTokens(sub.turnTokens)
+	}
 	close(sub.Events)
 	<-drained
 	watchdog.stop()
@@ -544,7 +624,7 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 	if a.turnConvocations >= k.MaxConvocations {
 		return "", fmt.Errorf("mesa reached its convocation limit (%d): converge and hand off to execution", k.MaxConvocations)
 	}
-	if a.turnTokens >= k.TokenBudget {
+	if a.turnTokens-a.mesaTokenBase >= k.TokenBudget {
 		return "", fmt.Errorf("mesa reached its token budget (%d): converge and hand off to execution", k.TokenBudget)
 	}
 	persona, err := a.squadStore.Resolve(name)
@@ -552,9 +632,18 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 		return "", err
 	}
 	a.turnConvocations++
+	m := a.currentMesa()
+	if m != nil {
+		m.AddConvocation()
+		m.StartDeliberation(name)
+	}
 	reg := a.personaRegistry()
 	pin := a.personaPin(name)
-	return a.RunSyncPersona(ctx, persona, description, guidance, pin, reg)
+	text, err := a.RunSyncPersona(ctx, persona, description, guidance, pin, reg)
+	if m != nil {
+		m.FinishDeliberation(name)
+	}
+	return text, err
 }
 
 func (a *Agent) roleInKickoff(k *squad.Kickoff, name string) bool {
@@ -644,6 +733,10 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 	if a.depth == 0 {
 		a.turnConvocations = 0
 		a.turnTokens = 0
+		a.mesaTokenBase = 0
+		if m := a.currentMesa(); m != nil {
+			m.ResetTurn()
+		}
 	}
 	for step := 0; step < limit; step++ {
 		partial.Reset()
@@ -684,33 +777,50 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			Agent:         a.agentName,
 		})
 
-		model, _ := a.Catalog.Get(decision.Model)
-		if a.needsCompaction(model.ContextWindow) {
-			_ = a.compact(ctx)
-		}
-		for a.needsCompaction(model.ContextWindow) {
-			if !a.truncateOldToolResults() {
+		attempts := append([]string{decision.Model}, a.rateLimitFallbacks(decision, hasImageParts(userMessage))...)
+		var result llm.StreamResult
+		for i, name := range attempts {
+			model, _ := a.Catalog.Get(name)
+			if a.needsCompaction(model.ContextWindow) {
+				_ = a.compact(ctx)
+			}
+			for a.needsCompaction(model.ContextWindow) {
+				if !a.truncateOldToolResults() {
+					break
+				}
+			}
+			if i > 0 {
+				a.emit(Event{Kind: EventRoute, Model: name, Router: decision.Router, Reason: "rate limited, next best model"})
+				a.Session.Write(session.Event{Type: "route", Model: name, Router: decision.Router, Reason: "rate limited, next best model", Depth: a.depth, Agent: a.agentName})
+			}
+			var deltas int
+			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.Tools.Definitions(), func(s string) {
+				deltas++
+				partial.WriteString(s)
+				a.emit(Event{Kind: EventDelta, Model: name, Text: s})
+			})
+			if err == nil {
+				decision.Model = name
 				break
 			}
-		}
-		var deltas int
-		result, err := a.LLM.ChatStream(ctx, decision.Model, a.withSystemPrompt(), a.Tools.Definitions(), func(s string) {
-			deltas++
-			partial.WriteString(s)
-			a.emit(Event{Kind: EventDelta, Model: decision.Model, Text: s})
-		})
-		if err != nil {
 			if isAbort(ctx, err) {
-				a.abortTurn(decision.Model, &partial, nil)
+				a.abortTurn(name, &partial, nil)
 				return "", ctx.Err()
 			}
-			a.writeSnapshot()
-			a.emitError(err.Error())
-			return "", err
+			if !llm.IsRateLimited(err) || i == len(attempts)-1 {
+				a.writeSnapshot()
+				a.emitError(err.Error())
+				return "", err
+			}
 		}
+		model, _ := a.Catalog.Get(decision.Model)
 		a.lastPromptTokens = result.Usage.PromptTokens
 		a.lastEstimateChars = a.promptChars()
-		a.turnTokens += result.Usage.PromptTokens + result.Usage.CompletionTokens
+		used := result.Usage.PromptTokens + result.Usage.CompletionTokens
+		a.turnTokens += used
+		if m := a.currentMesa(); m != nil {
+			m.AddTokens(used)
+		}
 		if ctx.Err() != nil && len(result.ToolCalls) > 0 {
 			a.abortTurn(decision.Model, &partial, nil)
 			return "", ctx.Err()
@@ -731,7 +841,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			pending := result.ToolCalls
 			for _, tc := range result.ToolCalls {
 				a.Session.Write(session.Event{Type: "tool_call", Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, Cost: cost, Depth: a.depth, Agent: a.agentName})
-				a.emit(Event{Kind: EventToolStart, Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments})
+				a.emit(Event{Kind: EventToolStart, Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, SessionCost: a.sessionCost, TurnTokens: a.turnTokens})
 				approved := true
 				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) {
 					diff, _ := a.Tools.PendingDiff(ctx, tc.Function.Name, tc.Function.Arguments)
@@ -785,7 +895,8 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			Text:        result.Content,
 			SessionCost: a.sessionCost,
 			TPS:         tps,
-			Tokens:      result.Usage.PromptTokens + result.Usage.CompletionTokens,
+			Tokens:      used,
+			TurnTokens:  a.turnTokens,
 		})
 		return result.Content, nil
 	}
@@ -799,6 +910,52 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 
 func isAbort(ctx context.Context, err error) bool {
 	return errors.Is(err, context.Canceled) || ctx.Err() != nil
+}
+
+const rateLimitFallbackCount = 2
+
+func (a *Agent) rateLimitFallbacks(decision router.Decision, hasImages bool) []string {
+	tried := map[string]bool{decision.Model: true}
+	var out []string
+	add := func(name string) {
+		if len(out) >= rateLimitFallbackCount || tried[name] {
+			return
+		}
+		m, ok := a.Catalog.Get(name)
+		if !ok || (hasImages && !m.Vision) {
+			return
+		}
+		tried[name] = true
+		out = append(out, name)
+	}
+	for _, name := range modelsByProbabilityDesc(decision.Probabilities) {
+		add(name)
+		if len(out) >= rateLimitFallbackCount {
+			return out
+		}
+	}
+	for _, m := range a.candidates {
+		add(m.Name)
+		if len(out) >= rateLimitFallbackCount {
+			return out
+		}
+	}
+	return out
+}
+
+func modelsByProbabilityDesc(probs map[string]float64) []string {
+	names := make([]string, 0, len(probs))
+	for name := range probs {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		pi, pj := probs[names[i]], probs[names[j]]
+		if pi != pj {
+			return pi > pj
+		}
+		return names[i] < names[j]
+	})
+	return names
 }
 
 func (a *Agent) executeTool(ctx context.Context, name, argsJSON string) (tools.Result, error) {

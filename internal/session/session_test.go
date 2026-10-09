@@ -7,10 +7,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"kterminal/internal/llm"
+	"kterminal/internal/squad"
 )
 
 func newTestWriter(t *testing.T) *Writer {
@@ -60,7 +62,7 @@ func TestSnapshotRoundtrip(t *testing.T) {
 		{Role: "tool", ToolCallID: "call_1", Content: "file1\nfile2"},
 	}
 	for _, turn := range [][]llm.Message{turn1, turn2, turn3} {
-		if err := w.WriteSnapshot(turn, "", ""); err != nil {
+		if err := w.WriteSnapshot(turn, "", "", nil); err != nil {
 			t.Fatalf("write snapshot: %v", err)
 		}
 	}
@@ -103,11 +105,11 @@ func TestLoadUsesLastSnapshot(t *testing.T) {
 		{Role: "assistant", Content: "answer B"},
 	}
 	w.Write(Event{Type: "user", Content: "state A"})
-	if err := w.WriteSnapshot(stateA, "", ""); err != nil {
+	if err := w.WriteSnapshot(stateA, "", "", nil); err != nil {
 		t.Fatalf("write snapshot A: %v", err)
 	}
 	w.Write(Event{Type: "assistant", Content: "answer B"})
-	if err := w.WriteSnapshot(stateB, "", ""); err != nil {
+	if err := w.WriteSnapshot(stateB, "", "", nil); err != nil {
 		t.Fatalf("write snapshot B: %v", err)
 	}
 	got, err := Load(w.Path())
@@ -193,7 +195,7 @@ func TestLoadLatestPicksNewest(t *testing.T) {
 func TestAppendWriterAppends(t *testing.T) {
 	w := newTestWriter(t)
 	first := []llm.Message{{Role: "user", Content: "first turn"}}
-	if err := w.WriteSnapshot(first, "", ""); err != nil {
+	if err := w.WriteSnapshot(first, "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	original, err := os.ReadFile(w.Path())
@@ -215,7 +217,7 @@ func TestAppendWriterAppends(t *testing.T) {
 		{Role: "user", Content: "first turn"},
 		{Role: "assistant", Content: "second turn"},
 	}
-	if err := aw.WriteSnapshot(second, "", ""); err != nil {
+	if err := aw.WriteSnapshot(second, "", "", nil); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
 	if err := aw.Close(); err != nil {
@@ -279,7 +281,7 @@ func TestWriteSnapshotOmitsImageParts(t *testing.T) {
 			{Type: "image_url", ImageURL: &llm.ImageURL{URL: uri}},
 		},
 	}}
-	if err := w.WriteSnapshot(messages, "", ""); err != nil {
+	if err := w.WriteSnapshot(messages, "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -308,7 +310,7 @@ func TestWriteSnapshotKeepsTextParts(t *testing.T) {
 			{Type: "text", Text: "extra"},
 		},
 	}}
-	if err := w.WriteSnapshot(messages, "", ""); err != nil {
+	if err := w.WriteSnapshot(messages, "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	got, err := Load(w.Path())
@@ -329,7 +331,7 @@ func TestSnapshotCarriesSkill(t *testing.T) {
 		{Role: "user", Content: "run the prd flow"},
 		{Role: "assistant", Content: "done"},
 	}
-	if err := w.WriteSnapshot(messages, "kspec-prd", ""); err != nil {
+	if err := w.WriteSnapshot(messages, "kspec-prd", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	snap, err := Load(w.Path())
@@ -344,7 +346,7 @@ func TestSnapshotCarriesSkill(t *testing.T) {
 
 func TestSnapshotOmitsEmptySkill(t *testing.T) {
 	w := newTestWriter(t)
-	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", ""); err != nil {
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -418,7 +420,7 @@ func TestSnapshotCarriesMode(t *testing.T) {
 		{Role: "user", Content: "design the API"},
 		{Role: "assistant", Content: "squad plan ready"},
 	}
-	if err := w.WriteSnapshot(messages, "", "squad"); err != nil {
+	if err := w.WriteSnapshot(messages, "", "squad", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	snap, err := Load(w.Path())
@@ -433,7 +435,7 @@ func TestSnapshotCarriesMode(t *testing.T) {
 
 func TestSnapshotOmitsEmptyMode(t *testing.T) {
 	w := newTestWriter(t)
-	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", ""); err != nil {
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -461,5 +463,184 @@ func TestLoadOldJSONLWithoutAgentOrMode(t *testing.T) {
 	}
 	if len(snap.Messages) != 1 || snap.Messages[0].Content != "legacy session" {
 		t.Fatalf("old snapshot messages = %+v, want legacy session", snap.Messages)
+	}
+}
+
+func populatedMesa() *squad.Mesa {
+	m := &squad.Mesa{}
+	m.Reset(
+		squad.Kickoff{Roles: []string{"architect", "backend", "qa"}, MaxConvocations: 6, TokenBudget: 150000},
+		map[string]string{"architect": "architecture", "backend": "backend", "qa": "quality"},
+	)
+	m.AddConvocation()
+	m.AddConvocation()
+	m.AddTokens(4200)
+	m.StartDeliberation("architect")
+	m.ObservePersona("architect", "model-a", 900, 0.5)
+	m.FinishDeliberation("architect")
+	m.StartDeliberation("backend")
+	m.ObservePersona("backend", "model-b", 300, 0.75)
+	return m
+}
+
+func assertMesaEqual(t *testing.T, got, want *squad.Mesa) {
+	t.Helper()
+	if !reflect.DeepEqual(got.Roles, want.Roles) {
+		t.Errorf("mesa roles = %v, want %v", got.Roles, want.Roles)
+	}
+	if got.MaxConvocations != want.MaxConvocations {
+		t.Errorf("mesa max_convocations = %d, want %d", got.MaxConvocations, want.MaxConvocations)
+	}
+	if got.TokenBudget != want.TokenBudget {
+		t.Errorf("mesa token_budget = %d, want %d", got.TokenBudget, want.TokenBudget)
+	}
+	if got.Convocations != want.Convocations {
+		t.Errorf("mesa convocations = %d, want %d", got.Convocations, want.Convocations)
+	}
+	if got.Tokens != want.Tokens {
+		t.Errorf("mesa tokens = %d, want %d", got.Tokens, want.Tokens)
+	}
+	if !reflect.DeepEqual(got.Entries, want.Entries) {
+		t.Errorf("mesa entries = %+v, want %+v", got.Entries, want.Entries)
+	}
+}
+
+func TestSnapshotRoundtripWithMesa(t *testing.T) {
+	w := newTestWriter(t)
+	messages := []llm.Message{
+		{Role: "user", Content: "design the API"},
+		{Role: "assistant", Content: "squad plan ready"},
+	}
+	mesa := populatedMesa()
+	if err := w.WriteSnapshot(messages, "", "squad", mesa); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	snap, err := Load(w.Path())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if snap.Mesa == nil {
+		t.Fatalf("snapshot mesa = nil, want restored mesa")
+	}
+	assertMesaEqual(t, snap.Mesa, mesa)
+	if snap.Mode != "squad" {
+		t.Fatalf("snapshot mode = %q, want squad", snap.Mode)
+	}
+	assertMessagesEqual(t, snap.Messages, messages)
+}
+
+func TestSnapshotOmitsNilMesa(t *testing.T) {
+	w := newTestWriter(t)
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	data, err := os.ReadFile(w.Path())
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if strings.Contains(string(data), `"mesa"`) {
+		t.Fatalf("snapshot with nil mesa leaked the field: %s", data)
+	}
+	snap, err := Load(w.Path())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if snap.Mesa != nil {
+		t.Fatalf("snapshot mesa = %+v, want nil", snap.Mesa)
+	}
+}
+
+func TestLoadOldJSONLWithoutMesa(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "old.jsonl")
+	oldLine := `{"type":"snapshot","messages":[{"role":"user","content":"legacy session"}],"skill":"kspec-prd","mode":"squad"}` + "\n"
+	if err := os.WriteFile(path, []byte(oldLine), 0o600); err != nil {
+		t.Fatalf("write old transcript: %v", err)
+	}
+	snap, err := Load(path)
+	if err != nil {
+		t.Fatalf("load old JSONL: %v", err)
+	}
+	if snap.Mesa != nil {
+		t.Fatalf("old snapshot mesa = %+v, want nil", snap.Mesa)
+	}
+	if snap.Skill != "kspec-prd" || snap.Mode != "squad" {
+		t.Fatalf("old snapshot skill/mode = %q/%q, want kspec-prd/squad", snap.Skill, snap.Mode)
+	}
+	if len(snap.Messages) != 1 || snap.Messages[0].Content != "legacy session" {
+		t.Fatalf("old snapshot messages = %+v, want legacy session", snap.Messages)
+	}
+}
+
+func TestResumeLoadLatestTranscriptWithMesa(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	mesa := populatedMesa()
+	mesaRaw, err := json.Marshal(mesa)
+	if err != nil {
+		t.Fatalf("marshal mesa: %v", err)
+	}
+	messagesRaw := string(mustJSON(t, []llm.Message{
+		{Role: "user", Content: "design the API"},
+		{Role: "assistant", Content: "architect contribution"},
+	}))
+	lines := []string{
+		`{"type":"user","content":"design the API","mode":"squad"}`,
+		`{"type":"assistant","content":"plan ready","agent":"architect","mode":"squad"}`,
+		`{"type":"snapshot","messages":` + messagesRaw + `,"skill":"","mode":"squad","mesa":` + string(mesaRaw) + `}`,
+		`{"type":"user","content":"follow up after snapshot"}`,
+	}
+	path := filepath.Join(Dir(), "20260101-120000.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	resumedPath, snap, err := LoadLatest()
+	if err != nil {
+		t.Fatalf("load latest: %v", err)
+	}
+	if resumedPath != path {
+		t.Fatalf("resumed path = %s, want %s", resumedPath, path)
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("resumed mode = %q, want squad", snap.Mode)
+	}
+	if snap.Mesa == nil {
+		t.Fatalf("resumed mesa = nil, want restored mesa")
+	}
+	assertMesaEqual(t, snap.Mesa, mesa)
+	if len(snap.Messages) != 2 || snap.Messages[1].Content != "architect contribution" {
+		t.Fatalf("resumed messages = %+v, want snapshot messages", snap.Messages)
+	}
+}
+
+func TestResumeLoadLatestPreFeatureSnapshotWithoutMesa(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	oldLine := `{"type":"snapshot","messages":[{"role":"user","content":"legacy squad session"}],"skill":"","mode":"squad"}` + "\n"
+	path := filepath.Join(Dir(), "20240101-000000.jsonl")
+	if err := os.WriteFile(path, []byte(oldLine), 0o600); err != nil {
+		t.Fatalf("write pre-feature transcript: %v", err)
+	}
+
+	gotPath, snap, err := LoadLatest()
+	if err != nil {
+		t.Fatalf("load latest pre-feature snapshot: %v", err)
+	}
+	if gotPath != path {
+		t.Fatalf("resumed path = %s, want %s", gotPath, path)
+	}
+	if snap.Mode != "squad" {
+		t.Fatalf("pre-feature snapshot mode = %q, want squad", snap.Mode)
+	}
+	if snap.Mesa != nil {
+		t.Fatalf("pre-feature snapshot mesa = %+v, want nil", snap.Mesa)
+	}
+	if len(snap.Messages) != 1 || snap.Messages[0].Content != "legacy squad session" {
+		t.Fatalf("pre-feature snapshot messages = %+v, want the legacy session", snap.Messages)
 	}
 }

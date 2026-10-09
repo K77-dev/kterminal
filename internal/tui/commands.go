@@ -144,6 +144,7 @@ func (m Model) selectMode() (tea.Model, tea.Cmd) {
 	} else {
 		m.blocks = append(m.blocks, primaryStyle.Render("mode: "+mode))
 	}
+	m.fitChatColumn()
 	m.refreshContent()
 	return m, nil
 }

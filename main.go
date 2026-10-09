@@ -115,6 +115,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	ag.RestoreMesa(resumed.Mesa)
 	if resumed.Skill != "" {
 		ag.RestoreSkill(resumed.Skill)
 	}
