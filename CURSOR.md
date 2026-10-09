@@ -112,6 +112,7 @@ Os agents são acionados automaticamente pelas skills. No Cursor, a delegação 
 - **Fluxo padrão de entrega**: commitar na branch da feature → fast-forward merge em `develop` → `main` → push das três branches → voltar para `develop` (branch padrão para iniciar novos trabalhos e o fluxo SDD)
 - **Não execute** `git restore`, `git reset`, `git clean` ou comandos destrutivos **sem permissão explícita do usuário**
 - Binário `kterminal` e `*.test` não são versionados (`.gitignore`)
+- **Graphify ativo**: knowledge graph em `graphify-out/graph.json` (não versionado, build code-only). Git hooks (post-commit/post-checkout) o mantêm fresco via `graphify update` (sem LLM). Skills kspec o consultam seguindo `.agents/rules/graphify.md`; edges `INFERRED` são hipótese, `EXTRACTED` são fato
 
 ## Limitações conhecidas no Cursor
 
