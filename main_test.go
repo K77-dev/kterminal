@@ -76,7 +76,7 @@ func TestResolveSessionContinueLoadsLatest(t *testing.T) {
 		{Role: "user", Content: "latest session"},
 		{Role: "assistant", Content: "resumed answer"},
 	}
-	if err := w.WriteSnapshot(resumed, ""); err != nil {
+	if err := w.WriteSnapshot(resumed, "", ""); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
 	data, err := os.ReadFile(latest)

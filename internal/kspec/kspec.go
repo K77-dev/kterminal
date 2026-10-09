@@ -40,8 +40,9 @@ type Skill struct {
 }
 
 type Rule struct {
-	Name    string
-	Content string
+	Name        string
+	Disciplines []string
+	Content     string
 }
 
 type InvalidSkill struct {
@@ -277,9 +278,21 @@ func readRules(entries []fs.DirEntry, read func(string) ([]byte, error)) []Rule 
 		if err != nil {
 			continue
 		}
-		out = append(out, Rule{Name: strings.TrimSuffix(e.Name(), ".md"), Content: string(data)})
+		out = append(out, Rule{
+			Name:        strings.TrimSuffix(e.Name(), ".md"),
+			Disciplines: ruleDisciplines(data),
+			Content:     string(data),
+		})
 	}
 	return out
+}
+
+func ruleDisciplines(data []byte) []string {
+	fm, err := parseRuleFrontmatter(data)
+	if err != nil {
+		return nil
+	}
+	return fm.Disciplines
 }
 
 func (s *Store) Resolve(name string) (string, error) {

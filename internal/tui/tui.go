@@ -112,6 +112,11 @@ type Model struct {
 	cmdSelected   int
 	cmdSkillCache []string
 
+	modeOpen     bool
+	modeSelected int
+
+	pendingUserQueue []string
+
 	currentModel   string
 	routerInfo     string
 	sessionCost    float64
@@ -397,6 +402,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 	switch e.Kind {
 	case agent.EventRoute:
 		m.turnConsumed = true
+		m.flushPendingQueue()
 		m.currentModel = e.Model
 		m.routerInfo = fmt.Sprintf("%s %.2f", e.Router, e.Confidence)
 		route := fmt.Sprintf("⚡ %s · %s", e.Model, m.routerInfo)
@@ -615,6 +621,25 @@ func renderDiffLine(d tools.DiffLine) string {
 
 func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.copyFlash = ""
+	if m.modeOpen {
+		switch msg.String() {
+		case "tab", "enter":
+			return m.selectMode()
+		case "esc":
+			m.closeModePopup()
+			return m, nil
+		case "up":
+			if n := len(modeOptions); n > 0 {
+				m.modeSelected = (m.modeSelected - 1 + n) % n
+			}
+			return m, nil
+		case "down":
+			if n := len(modeOptions); n > 0 {
+				m.modeSelected = (m.modeSelected + 1) % n
+			}
+			return m, nil
+		}
+	}
 	if m.mentionOpen {
 		switch msg.String() {
 		case "tab", "enter":
@@ -696,6 +721,9 @@ func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleCommand(value)
 		}
 		if m.busy {
+			if m.agent.Mode() == "squad" {
+				return m.enqueueUserMessage(value)
+			}
 			m.blocks = append(m.blocks, warningStyle.Render("busy — wait for the current task to finish"))
 			m.refreshContent()
 			return m, nil
@@ -780,6 +808,26 @@ func (m *Model) pushPromptHistory(prompt string) {
 	if len(m.promptHistory) > maxPromptHistory {
 		m.promptHistory = m.promptHistory[len(m.promptHistory)-maxPromptHistory:]
 	}
+}
+
+func (m *Model) enqueueUserMessage(text string) (tea.Model, tea.Cmd) {
+	m.agent.EnqueueUserMessage(text)
+	m.pendingUserQueue = append(m.pendingUserQueue, text)
+	m.blocks = append(m.blocks, userBlock(text, nil))
+	m.blocks = append(m.blocks, resultStyle.Render("⏳ queued for the squad — consumed between convocations"))
+	m.pushPromptHistory(text)
+	m.refreshContent()
+	return m, nil
+}
+
+func (m *Model) flushPendingQueue() {
+	if len(m.pendingUserQueue) == 0 {
+		return
+	}
+	for range m.pendingUserQueue {
+		m.blocks = append(m.blocks, resultStyle.Render("✓ squad consumed the queued message"))
+	}
+	m.pendingUserQueue = nil
 }
 
 func (m *Model) navigateHistory(up bool) bool {
@@ -939,6 +987,7 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		lines := []string{
 			"/config — configure gateway and API keys",
 			"/model <name> — pin a model · /model auto — let Jev decide",
+			"/mode — switch between sdd and squad modes",
 			"/image <path> — attach an image · /image — list pending · /unimage <n> — remove",
 			"/clear — clear the conversation",
 			"/help — this help",
@@ -969,6 +1018,9 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		}
 		m.cfgInputs[0].Focus()
 		m.state = stateConfig
+		return m, nil
+	case "/mode":
+		m.openModePopup()
 		return m, nil
 	case "/model":
 		if len(parts) < 2 || parts[1] == "auto" {
@@ -1351,6 +1403,9 @@ func (m Model) hintBar() string {
 	if s := m.agent.ActiveSkill(); s != "" {
 		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
 	}
+	if m.agent.Mode() == "squad" {
+		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
+	}
 	if p := m.agent.Pinned(); p != "" {
 		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
 	}
@@ -1404,6 +1459,10 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 	if popup := m.commandPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.modePopupView(); popup != "" {
 		b.WriteString(indentLines(popup, chatInset))
 		b.WriteString("\n")
 	}

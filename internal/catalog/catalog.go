@@ -97,5 +97,8 @@ func (m Model) Criteria() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — %s. Strengths: %s. Price: $%.2f/M input, $%.2f/M output. %s Context: %d tokens.",
 		m.Name, m.Description, m.Strengths, m.InputPricePerM, m.OutputPricePerM, speed, m.ContextWindow)
+	if len(m.Tags) > 0 {
+		fmt.Fprintf(&b, " Tags: %s.", strings.Join(m.Tags, ", "))
+	}
 	return b.String()
 }

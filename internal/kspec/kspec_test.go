@@ -1069,3 +1069,30 @@ func TestBootstrapWithoutEmbeddedContent(t *testing.T) {
 		t.Fatalf("err = %v, want embedded content unavailable", err)
 	}
 }
+
+func TestRuleDisciplinesParsed(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		filepath.Join(".agents", "rules", "go.md"): "---\ndisciplines: [backend, architecture]\n---\n# Go\ngofmt, no comments.\n",
+	})
+	rules := storeAt(t, dir).Rules()
+	if len(rules) != 1 {
+		t.Fatalf("Rules() = %d, want 1", len(rules))
+	}
+	got := rules[0].Disciplines
+	if len(got) != 2 || got[0] != "backend" || got[1] != "architecture" {
+		t.Fatalf("Disciplines = %v, want [backend architecture]", got)
+	}
+}
+
+func TestRuleWithoutFrontmatterHasNoDisciplines(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		filepath.Join(".agents", "rules", "plain.md"): "# Plain\n\nno frontmatter here\n",
+	})
+	rules := storeAt(t, dir).Rules()
+	if len(rules) != 1 {
+		t.Fatalf("Rules() = %d, want 1", len(rules))
+	}
+	if len(rules[0].Disciplines) != 0 {
+		t.Fatalf("Disciplines = %v, want none for a rule without frontmatter", rules[0].Disciplines)
+	}
+}

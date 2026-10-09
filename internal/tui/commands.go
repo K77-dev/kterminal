@@ -15,7 +15,11 @@ const maxHelpLineRunes = 72
 const kspecKickoffPrefix = "Begin the "
 const kspecKickoffSuffix = " workflow now."
 
-var nativeCommands = []string{"/clear", "/config", "/exit", "/help", "/image", "/model", "/quit", "/unimage"}
+var nativeCommands = []string{"/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/unimage"}
+
+var modeOptions = []string{"sdd", "squad"}
+
+const modeCommand = "/mode"
 
 func (m *Model) closeCommandPopup() {
 	m.cmdOpen = false
@@ -105,6 +109,57 @@ func (m Model) commandPopupView() string {
 			b.WriteString("\n")
 		}
 		if i == m.cmdSelected {
+			b.WriteString(mentionSelectedStyle.Render("▸ " + item))
+		} else {
+			b.WriteString(mentionItemStyle.Render("  " + item))
+		}
+	}
+	return mentionPopupStyle.Render(b.String())
+}
+
+func (m *Model) closeModePopup() {
+	m.modeOpen = false
+	m.modeSelected = 0
+}
+
+func (m *Model) openModePopup() {
+	m.closeCommandPopup()
+	m.modeOpen = true
+	m.modeSelected = 0
+	for i, opt := range modeOptions {
+		if opt == m.agent.Mode() {
+			m.modeSelected = i
+		}
+	}
+}
+
+func (m Model) selectMode() (tea.Model, tea.Cmd) {
+	if !m.modeOpen || len(modeOptions) == 0 {
+		return m, nil
+	}
+	mode := modeOptions[m.modeSelected]
+	m.closeModePopup()
+	if err := m.agent.ActivateMode(mode); err != nil {
+		m.blocks = append(m.blocks, errorBoxStyle.Render(err.Error()))
+	} else {
+		m.blocks = append(m.blocks, primaryStyle.Render("mode: "+mode))
+	}
+	m.refreshContent()
+	return m, nil
+}
+
+func (m Model) modePopupView() string {
+	if !m.modeOpen {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(labelStyle.Render("mode"))
+	b.WriteString("\n")
+	for i, item := range modeOptions {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if i == m.modeSelected {
 			b.WriteString(mentionSelectedStyle.Render("▸ " + item))
 		} else {
 			b.WriteString(mentionItemStyle.Render("  " + item))

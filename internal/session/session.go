@@ -38,6 +38,8 @@ type Event struct {
 	Error         string             `json:"error,omitempty"`
 	Skill         string             `json:"skill,omitempty"`
 	Source        string             `json:"source,omitempty"`
+	Agent         string             `json:"agent,omitempty"`
+	Mode          string             `json:"mode,omitempty"`
 	TokensBefore  int64              `json:"tokens_before,omitempty"`
 	TokensAfter   int64              `json:"tokens_after,omitempty"`
 	Messages      json.RawMessage    `json:"messages,omitempty"`
@@ -90,14 +92,15 @@ const omittedImageURL = "[omitted]"
 type Snapshot struct {
 	Messages []llm.Message
 	Skill    string
+	Mode     string
 }
 
-func (w *Writer) WriteSnapshot(messages []llm.Message, skill string) error {
+func (w *Writer) WriteSnapshot(messages []llm.Message, skill, mode string) error {
 	raw, err := json.Marshal(snapshotMessages(messages))
 	if err != nil {
 		return err
 	}
-	w.Write(Event{Type: "snapshot", Messages: raw, Skill: skill})
+	w.Write(Event{Type: "snapshot", Messages: raw, Skill: skill, Mode: mode})
 	return nil
 }
 
@@ -168,7 +171,7 @@ func Load(path string) (Snapshot, error) {
 		if err := json.Unmarshal(ev.Messages, &messages); err != nil {
 			return Snapshot{}, fmt.Errorf("snapshot inválido em %s: %w", path, err)
 		}
-		return Snapshot{Messages: messages, Skill: ev.Skill}, nil
+		return Snapshot{Messages: messages, Skill: ev.Skill, Mode: ev.Mode}, nil
 	}
 	return Snapshot{}, errors.New("sessão sem snapshot")
 }

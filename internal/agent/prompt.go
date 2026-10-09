@@ -69,7 +69,7 @@ func (a *Agent) ClearSkill() error {
 		return nil
 	}
 	a.activeSkill = ""
-	a.systemPrompt = a.buildSystemPrompt()
+	a.rebuildSystemPrompt()
 	return nil
 }
 
@@ -96,12 +96,20 @@ func (a *Agent) skillExists(name string) bool {
 
 func (a *Agent) applySkill(name, eventType string) {
 	a.activeSkill = name
-	a.systemPrompt = a.buildSystemPrompt()
+	a.rebuildSystemPrompt()
 	source := ""
 	if a.kspecStore != nil {
 		source = a.kspecStore.Source()
 	}
 	a.Session.Write(session.Event{Type: eventType, Skill: name, Source: source, Depth: a.depth})
+}
+
+func (a *Agent) rebuildSystemPrompt() {
+	if a.mode == "squad" && a.squadStore != nil {
+		a.systemPrompt = a.squadStore.MaestroPrompt()
+		return
+	}
+	a.systemPrompt = a.buildSystemPrompt()
 }
 
 func (a *Agent) buildSystemPrompt() string {

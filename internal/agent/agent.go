@@ -13,6 +13,7 @@ import (
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
+	"kterminal/internal/squad"
 	"kterminal/internal/telemetry"
 	"kterminal/internal/tools"
 )
@@ -49,6 +50,7 @@ const (
 	EventTurnAborted EventKind = "turn_aborted"
 	EventError       EventKind = "error"
 	EventCompaction  EventKind = "compaction"
+	EventKickoff     EventKind = "kickoff"
 )
 
 type AskOption = tools.AskOption
@@ -77,6 +79,7 @@ type Event struct {
 	TokensAfter   int64
 	Depth         int
 	ParentTool    string
+	Agent         string
 }
 
 type Agent struct {
@@ -93,8 +96,10 @@ type Agent struct {
 	messages          []llm.Message
 	turnMessage       llm.Message
 	kspecStore        *kspec.Store
+	squadStore        *squad.Store
 	activeSkill       string
 	systemPrompt      string
+	mode              string
 	lastPromptTokens  int64
 	lastEstimateChars int
 	candidates        []catalog.Model
@@ -107,6 +112,14 @@ type Agent struct {
 	now               func() time.Time
 	depth             int
 	subagentTimeout   time.Duration
+	agentName         string
+	persona           *squad.Persona
+	userQueue         []string
+	turnConvocations  int
+	turnTokens        int64
+	kickoff           *squad.Kickoff
+	squadPins         map[string]string
+	squadLimits       squad.Limits
 }
 
 func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *catalog.Catalog, reg *tools.Registry, sess *session.Writer, confirm bool) *Agent {
@@ -144,6 +157,8 @@ func (a *Agent) Reset() {
 	a.sessionCost = 0
 	a.lastPromptTokens = 0
 	a.lastEstimateChars = 0
+	a.turnConvocations = 0
+	a.turnTokens = 0
 	a.ClearSkill()
 }
 
@@ -151,6 +166,70 @@ func (a *Agent) SetMessages(messages []llm.Message) {
 	a.messages = messages
 	a.candidates = nil
 	a.sessionCost = 0
+}
+
+func (a *Agent) AttachSquad(s *squad.Store) {
+	a.squadStore = s
+}
+
+func (a *Agent) SetSquadPins(pins map[string]string) {
+	a.squadPins = pins
+}
+
+func (a *Agent) SetSquadLimits(l squad.Limits) {
+	a.squadLimits = l
+}
+
+func (a *Agent) SquadStore() *squad.Store {
+	return a.squadStore
+}
+
+func (a *Agent) ActivateMode(mode string) error {
+	if a.turnRunning() {
+		return errTurnActive
+	}
+	if mode != "sdd" && mode != "squad" {
+		return fmt.Errorf("invalid mode %q: must be \"sdd\" or \"squad\"", mode)
+	}
+	a.mode = mode
+	a.rebuildSystemPrompt()
+	return nil
+}
+
+func (a *Agent) Mode() string {
+	if a.mode == "" {
+		return "sdd"
+	}
+	return a.mode
+}
+
+func (a *Agent) EnqueueUserMessage(text string) {
+	a.mu.Lock()
+	a.userQueue = append(a.userQueue, text)
+	a.mu.Unlock()
+}
+
+func (a *Agent) RegisterKickoff(k squad.Kickoff) {
+	a.mu.Lock()
+	a.kickoff = &k
+	a.mu.Unlock()
+}
+
+func (a *Agent) Kickoff() *squad.Kickoff {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.kickoff
+}
+
+func (a *Agent) drainUserQueue() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.userQueue) == 0 {
+		return nil
+	}
+	msgs := a.userQueue
+	a.userQueue = nil
+	return msgs
 }
 
 func (a *Agent) emit(e Event) {
@@ -162,14 +241,14 @@ func (a *Agent) emit(e Event) {
 
 func (a *Agent) emitError(msg string) {
 	a.emit(Event{Kind: EventError, Text: msg})
-	a.Session.Write(session.Event{Type: "error", Error: msg, Depth: a.depth})
+	a.Session.Write(session.Event{Type: "error", Error: msg, Depth: a.depth, Agent: a.agentName})
 }
 
 func (a *Agent) stepLimit() int {
 	if a.depth > 0 {
 		return subagentMaxSteps
 	}
-	if a.activeSkill != "" {
+	if a.activeSkill != "" || a.mode == "squad" {
 		return skillMaxSteps
 	}
 	return maxSteps
@@ -179,7 +258,7 @@ func (a *Agent) writeSnapshot() {
 	if a.depth > 0 {
 		return
 	}
-	a.Session.WriteSnapshot(a.messages, a.activeSkill)
+	a.Session.WriteSnapshot(a.messages, a.activeSkill, a.mode)
 }
 
 func (a *Agent) Run(userInput string) {
@@ -221,6 +300,68 @@ func (a *Agent) Cancel() {
 
 func (a *Agent) RunSync(ctx context.Context, description, guidance string) (string, error) {
 	sub := a.newSubagent(description, guidance)
+	return a.runSubagent(ctx, sub)
+}
+
+func (a *Agent) RunSyncPersona(ctx context.Context, persona squad.Persona, description, guidance string, pinned string, reg *tools.Registry) (string, error) {
+	content := description
+	if guidance != "" {
+		content = description + "\n\n" + guidance
+	}
+	sub := &Agent{
+		LLM:             a.LLM,
+		Router:          a.Router,
+		Fallback:        a.Fallback,
+		Catalog:         a.Catalog,
+		Tools:           reg,
+		Session:         a.Session,
+		Telemetry:       a.Telemetry,
+		Confirm:         a.Confirm,
+		Events:          make(chan Event, 512),
+		depth:           a.depth + 1,
+		subagentTimeout: a.subagentTimeout,
+		ready:           a.LLM != nil,
+		now:             a.now,
+		agentName:       persona.Name,
+		persona:         &persona,
+	}
+	if pinned != "" {
+		sub.pinned = pinned
+	}
+	sub.messages = []llm.Message{
+		{Role: "system", Content: a.buildPersonaPrompt(persona)},
+		{Role: "user", Content: content},
+	}
+	sub.turnMessage = llm.Message{Role: "user", Content: content}
+	return a.runSubagent(ctx, sub)
+}
+
+func (a *Agent) buildPersonaPrompt(persona squad.Persona) string {
+	sections := []string{persona.Prompt}
+	if rules := a.personaRules(persona); len(rules) > 0 {
+		sections = append(sections, rulesSection(rules))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func (a *Agent) personaRules(persona squad.Persona) []kspec.Rule {
+	if a.kspecStore == nil {
+		return nil
+	}
+	disciplines := squad.PersonaDisciplines(persona)
+	var out []kspec.Rule
+	for _, r := range a.kspecStore.Rules() {
+		if len(r.Disciplines) == 0 {
+			continue
+		}
+		if squad.MatchesAny(disciplines, r.Disciplines) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	timeout := a.subagentTimeout
 	if timeout <= 0 {
 		timeout = subagentTimeout
@@ -233,6 +374,9 @@ func (a *Agent) RunSync(ctx context.Context, description, guidance string) (stri
 		for ev := range sub.Events {
 			ev.Depth = sub.depth
 			ev.ParentTool = taskToolName
+			if sub.agentName != "" {
+				ev.Agent = sub.agentName
+			}
 			a.emit(ev)
 		}
 		close(drained)
@@ -244,6 +388,7 @@ func (a *Agent) RunSync(ctx context.Context, description, guidance string) (stri
 		return "", err
 	}
 	text, err := sub.runLoop(ctx)
+	a.turnTokens += sub.turnTokens
 	close(sub.Events)
 	<-drained
 	if err != nil {
@@ -297,12 +442,13 @@ func (a *Agent) AttachTaskTool() {
 			Type: "function",
 			Function: llm.Function{
 				Name:        taskToolName,
-				Description: "Delegate a focused subtask to an isolated subagent and get its final answer",
+				Description: "Delegate a focused subtask to an isolated subagent and get its final answer. In squad mode, pass persona to convene a squad persona (read-only) instead.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"description": map[string]any{"type": "string", "description": "What the subagent must accomplish"},
 						"guidance":    map[string]any{"type": "string", "description": "Optional context, constraints or hints"},
+						"persona":     map[string]any{"type": "string", "description": "Convene a squad persona by name (requires a registered kickoff)"},
 					},
 					"required": []string{"description"},
 				},
@@ -311,6 +457,14 @@ func (a *Agent) AttachTaskTool() {
 		Execute: func(ctx context.Context, args map[string]any) (tools.Result, error) {
 			description, _ := args["description"].(string)
 			guidance, _ := args["guidance"].(string)
+			persona, _ := args["persona"].(string)
+			if persona != "" {
+				text, err := a.convokePersona(ctx, persona, description, guidance)
+				if err != nil {
+					return tools.Result{}, err
+				}
+				return tools.Result{Output: text}, nil
+			}
 			text, err := a.RunSync(ctx, description, guidance)
 			if err != nil {
 				return tools.Result{}, err
@@ -318,6 +472,77 @@ func (a *Agent) AttachTaskTool() {
 			return tools.Result{Output: text}, nil
 		},
 	})
+}
+
+func (a *Agent) convokePersona(ctx context.Context, name, description, guidance string) (string, error) {
+	k := a.Kickoff()
+	if k == nil {
+		return "", fmt.Errorf("no squad kickoff registered: call the %s tool first", tools.SquadKickoffToolName)
+	}
+	if a.squadStore == nil {
+		return "", fmt.Errorf("squad personas unavailable: no squad store attached")
+	}
+	if !a.roleInKickoff(k, name) {
+		return "", fmt.Errorf("persona %q is not part of the registered mesa (%v)", name, k.Roles)
+	}
+	if a.turnConvocations >= k.MaxConvocations {
+		return "", fmt.Errorf("mesa reached its convocation limit (%d): converge and hand off to execution", k.MaxConvocations)
+	}
+	if a.turnTokens >= k.TokenBudget {
+		return "", fmt.Errorf("mesa reached its token budget (%d): converge and hand off to execution", k.TokenBudget)
+	}
+	persona, err := a.squadStore.Resolve(name)
+	if err != nil {
+		return "", err
+	}
+	a.turnConvocations++
+	reg := a.personaRegistry()
+	pin := a.personaPin(name)
+	return a.RunSyncPersona(ctx, persona, description, guidance, pin, reg)
+}
+
+func (a *Agent) roleInKickoff(k *squad.Kickoff, name string) bool {
+	for _, role := range k.Roles {
+		if role == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) personaPin(name string) string {
+	if a.squadPins == nil {
+		return ""
+	}
+	return a.squadPins[name]
+}
+
+func (a *Agent) personaRegistry() *tools.Registry {
+	reg := tools.NewReadOnlyRegistry()
+	reg.SetOnGoEdit(a.Tools.OnGoEdit)
+	return reg
+}
+
+func (a *Agent) AttachSquadKickoffTool() {
+	if a.depth != 0 {
+		return
+	}
+	if a.squadStore == nil {
+		return
+	}
+	limits := a.squadLimits
+	if limits.MaxConvocations == 0 && limits.TokenBudget == 0 {
+		limits = squad.DefaultLimits()
+	}
+	a.Tools.Register(tools.SquadKickoffTool(a.squadStore, limits, func(k squad.Kickoff) {
+		a.RegisterKickoff(k)
+		a.emit(Event{Kind: EventKickoff, Text: formatKickoffText(k)})
+	}))
+}
+
+func formatKickoffText(k squad.Kickoff) string {
+	return fmt.Sprintf("mesa: roles=%v max_convocations=%d token_budget=%d exit_criterion=%q",
+		k.Roles, k.MaxConvocations, k.TokenBudget, k.ExitCriterion)
 }
 
 func (a *Agent) AttachAskUserTool() {
@@ -350,7 +575,7 @@ func (a *Agent) loop(ctx context.Context, userMessage llm.Message, meta []sessio
 			return
 		}
 		a.messages = append(a.messages, userMessage)
-		a.Session.Write(session.Event{Type: "user", Content: userMessage.Content, Attachments: meta, Depth: a.depth})
+		a.Session.Write(session.Event{Type: "user", Content: userMessage.Content, Attachments: meta, Depth: a.depth, Agent: a.agentName})
 		a.turnMessage = userMessage
 		_, _ = a.runLoop(ctx)
 	}()
@@ -360,8 +585,20 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 	userMessage := a.turnMessage
 	var partial strings.Builder
 	limit := a.stepLimit()
+	if a.depth == 0 {
+		a.turnConvocations = 0
+		a.turnTokens = 0
+	}
 	for step := 0; step < limit; step++ {
 		partial.Reset()
+		if a.depth == 0 && a.mode == "squad" {
+			if msgs := a.drainUserQueue(); len(msgs) > 0 {
+				for _, msg := range msgs {
+					a.messages = append(a.messages, llm.Message{Role: "user", Content: msg})
+					a.Session.Write(session.Event{Type: "user", Content: msg, Depth: a.depth, Agent: a.agentName})
+				}
+			}
+		}
 		decision, err := a.decide(ctx, userMessage, step)
 		if isAbort(ctx, err) {
 			a.abortTurn(decision.Model, &partial, nil)
@@ -388,6 +625,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			Probabilities: decision.Probabilities,
 			Reason:        decision.Reason,
 			Depth:         a.depth,
+			Agent:         a.agentName,
 		})
 
 		model, _ := a.Catalog.Get(decision.Model)
@@ -416,6 +654,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 		}
 		a.lastPromptTokens = result.Usage.PromptTokens
 		a.lastEstimateChars = a.promptChars()
+		a.turnTokens += result.Usage.PromptTokens + result.Usage.CompletionTokens
 		if ctx.Err() != nil && len(result.ToolCalls) > 0 {
 			a.abortTurn(decision.Model, &partial, nil)
 			return "", ctx.Err()
@@ -435,7 +674,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			a.messages = append(a.messages, llm.Message{Role: "assistant", Content: result.Content, ToolCalls: result.ToolCalls})
 			pending := result.ToolCalls
 			for _, tc := range result.ToolCalls {
-				a.Session.Write(session.Event{Type: "tool_call", Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, Cost: cost, Depth: a.depth})
+				a.Session.Write(session.Event{Type: "tool_call", Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, Cost: cost, Depth: a.depth, Agent: a.agentName})
 				a.emit(Event{Kind: EventToolStart, Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments})
 				approved := true
 				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) {
@@ -465,7 +704,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 						diff = res.Diff
 					}
 				}
-				a.Session.Write(session.Event{Type: "tool_result", Tool: tc.Function.Name, Result: toolResult, Diff: formatDiff(diff), Depth: a.depth})
+				a.Session.Write(session.Event{Type: "tool_result", Tool: tc.Function.Name, Result: toolResult, Diff: formatDiff(diff), Depth: a.depth, Agent: a.agentName})
 				a.emit(Event{Kind: EventToolResult, Tool: tc.Function.Name, Result: toolResult, Diff: diff})
 				a.messages = append(a.messages, llm.Message{Role: "tool", Content: toolResult, ToolCallID: tc.ID})
 				pending = pending[1:]
@@ -481,6 +720,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			Cost:    cost,
 			TPS:     tps,
 			Depth:   a.depth,
+			Agent:   a.agentName,
 		})
 		a.writeSnapshot()
 		a.emit(Event{
@@ -657,6 +897,9 @@ func filterVision(models []catalog.Model) []catalog.Model {
 
 func (a *Agent) buildState(userInput string, step int, hasImages bool) string {
 	var b strings.Builder
+	if a.persona != nil {
+		fmt.Fprintf(&b, "You are the %s persona %q in a engineering squad. Preferred model tags: %s. ", a.persona.Discipline, a.persona.Name, strings.Join(a.persona.ModelTags, ", "))
+	}
 	b.WriteString("Development task in a terminal-based coding agent. User request: ")
 	b.WriteString(userInput)
 	if step > 0 {

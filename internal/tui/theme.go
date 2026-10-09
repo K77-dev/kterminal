@@ -138,6 +138,27 @@ var (
 			Foreground(colSecondary)
 )
 
+var disciplineColors = map[string]lipgloss.Color{
+	"architecture": colAccent,
+	"backend":      colSecondary,
+	"database":     colInfo,
+	"frontend":     colPrimary,
+	"qa":           colSuccess,
+	"test":         colYellow,
+	"ux":           colWarning,
+}
+
+func disciplineColor(discipline string) lipgloss.Color {
+	if c, ok := disciplineColors[discipline]; ok {
+		return c
+	}
+	return colTextMuted
+}
+
+func agentLabelStyle(discipline string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(disciplineColor(discipline))
+}
+
 var logoLeft = []string{
 	"                        ",
 	"█_▀█ ████ █▀▀█ █▀▀█ █▄▄█",

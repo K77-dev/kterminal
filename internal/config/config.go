@@ -18,9 +18,27 @@ type Typesafe struct {
 	APIKey string `toml:"api_key"`
 }
 
+type Squad struct {
+	DefaultMode     string            `toml:"default_mode"`
+	MaxConvocations int               `toml:"max_convocations"`
+	TokenBudget     int64             `toml:"token_budget"`
+	Pins            map[string]string `toml:"pins"`
+}
+
 type Config struct {
 	LLM      LLM      `toml:"llm"`
 	Typesafe Typesafe `toml:"typesafe"`
+	Squad    Squad    `toml:"squad"`
+}
+
+const (
+	defaultMode            = "sdd"
+	defaultMaxConvocations = 8
+	defaultTokenBudget     = int64(200000)
+)
+
+func validMode(mode string) bool {
+	return mode == "sdd" || mode == "squad"
 }
 
 func Dir() string {
@@ -58,6 +76,18 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("TYPESAFE_API_KEY"); v != "" {
 		cfg.Typesafe.APIKey = v
+	}
+	if cfg.Squad.DefaultMode == "" {
+		cfg.Squad.DefaultMode = defaultMode
+	}
+	if cfg.Squad.MaxConvocations == 0 {
+		cfg.Squad.MaxConvocations = defaultMaxConvocations
+	}
+	if cfg.Squad.TokenBudget == 0 {
+		cfg.Squad.TokenBudget = defaultTokenBudget
+	}
+	if !validMode(cfg.Squad.DefaultMode) {
+		return nil, fmt.Errorf("invalid squad.default_mode %q: must be \"sdd\" or \"squad\"", cfg.Squad.DefaultMode)
 	}
 	return cfg, nil
 }

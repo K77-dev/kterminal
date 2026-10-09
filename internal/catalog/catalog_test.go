@@ -85,3 +85,24 @@ func TestParseIgnoresMeasuredFields(t *testing.T) {
 		}
 	}
 }
+
+func TestCriteriaIncludesTags(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	for _, m := range c.Models {
+		if len(m.Tags) == 0 {
+			continue
+		}
+		got := m.Criteria()
+		if !strings.Contains(got, "Tags:") {
+			t.Fatalf("criteria for %s missing Tags: %q", m.Name, got)
+		}
+		for _, tag := range m.Tags {
+			if !strings.Contains(got, tag) {
+				t.Fatalf("criteria for %s missing tag %q: %q", m.Name, tag, got)
+			}
+		}
+	}
+}

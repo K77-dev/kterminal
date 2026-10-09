@@ -440,7 +440,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected command popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/model", "/quit", "/unimage"}
+	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -519,7 +519,7 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/model", "/quit", "/unimage"}
+	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -527,6 +527,51 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
 	if m.cmdOpen {
 		t.Fatal("no store means no /kspec-* suggestions")
+	}
+}
+
+func TestModeCommandSwitchesToSquad(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/mode")
+	if !m.modeOpen {
+		t.Fatal("expected mode popup open after /mode")
+	}
+	if m.modeSelected != 0 {
+		t.Fatalf("selected = %d, want 0 (sdd pre-selected)", m.modeSelected)
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "sdd") || !strings.Contains(view, "squad") {
+		t.Fatalf("view missing the mode options:\n%s", view)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.modeOpen {
+		t.Fatal("mode popup must close after confirming")
+	}
+	if got := ag.Mode(); got != "squad" {
+		t.Fatalf("mode = %q, want squad", got)
+	}
+	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "mode squad") {
+		t.Fatalf("hint bar missing the mode:\n%s", hint)
+	}
+
+	m = runCommand(t, m, "/mode")
+	if !m.modeOpen {
+		t.Fatal("expected mode popup reopen")
+	}
+	if m.modeSelected != 1 {
+		t.Fatalf("selected = %d, want 1 (squad pre-selected on reopen)", m.modeSelected)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.modeOpen {
+		t.Fatal("esc must close the mode popup")
+	}
+	if got := ag.Mode(); got != "squad" {
+		t.Fatalf("mode = %q, want squad unchanged after esc", got)
 	}
 }
 

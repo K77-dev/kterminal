@@ -1,4 +1,4 @@
-package kspec
+package squad
 
 import (
 	"bytes"
@@ -8,26 +8,10 @@ import (
 )
 
 type frontmatter struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`
-	Description string `yaml:"description"`
-	ArgHint     string `yaml:"argument-hint"`
-}
-
-type ruleFrontmatter struct {
-	Disciplines []string `yaml:"disciplines"`
-}
-
-func parseRuleFrontmatter(data []byte) (ruleFrontmatter, error) {
-	var fm ruleFrontmatter
-	block, _, err := splitFrontmatter(data)
-	if err != nil {
-		return fm, err
-	}
-	if err := yaml.Unmarshal(block, &fm); err != nil {
-		return fm, fmt.Errorf("parse rule frontmatter: %w", err)
-	}
-	return fm, nil
+	Name       string   `yaml:"name"`
+	Discipline string   `yaml:"discipline"`
+	ModelTags  []string `yaml:"model-tags"`
+	Rules      []string `yaml:"rules"`
 }
 
 func parseFrontmatter(data []byte) (frontmatter, error) {

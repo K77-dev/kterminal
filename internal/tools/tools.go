@@ -47,6 +47,14 @@ func NewRegistry() *Registry {
 	return r
 }
 
+func NewReadOnlyRegistry() *Registry {
+	r := &Registry{tools: map[string]Tool{}}
+	r.Register(readTool())
+	r.Register(globTool())
+	r.Register(grepTool())
+	return r
+}
+
 func (r *Registry) Register(t Tool) {
 	r.tools[t.Name] = t
 	r.order = append(r.order, t.Name)

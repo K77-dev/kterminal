@@ -21,6 +21,7 @@ import (
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
+	"kterminal/internal/squad"
 	"kterminal/internal/telemetry"
 	"kterminal/internal/tools"
 	"kterminal/internal/tui"
@@ -46,6 +47,7 @@ func main() {
 
 	store := telemetry.Load(telemetryPath())
 	kspecStore := kspec.Load()
+	squadStore := squad.Load()
 
 	if *doctor {
 		runDoctor(cfg, cat, store, kspecStore)
@@ -87,10 +89,24 @@ func main() {
 	ag := agent.New(llmClient, jevRouter, fallback, cat, reg, sess, *confirm)
 	ag.Telemetry = store
 	ag.AttachKspec(kspecStore)
+	ag.AttachSquad(squadStore)
+	ag.SetSquadPins(cfg.Squad.Pins)
+	ag.SetSquadLimits(squad.Limits{MaxConvocations: cfg.Squad.MaxConvocations, TokenBudget: cfg.Squad.TokenBudget})
 	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
 	ag.AttachAskUserTool()
 	if len(resumed.Messages) > 0 {
 		ag.SetMessages(resumed.Messages)
+	}
+	if err := ag.ActivateMode(cfg.Squad.DefaultMode); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if resumed.Mode != "" && resumed.Mode != cfg.Squad.DefaultMode {
+		if err := ag.ActivateMode(resumed.Mode); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	}
 	if resumed.Skill != "" {
 		ag.RestoreSkill(resumed.Skill)

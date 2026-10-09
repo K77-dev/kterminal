@@ -21,6 +21,7 @@ import (
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
+	"kterminal/internal/squad"
 	"kterminal/internal/telemetry"
 	"kterminal/internal/tools"
 )
@@ -4098,4 +4099,381 @@ func TestSDDFlowSkillPromptAskUserAndArtifact(t *testing.T) {
 	if activation["skill"] != "kspec-prd" || activation["source"] != kspec.SourceEmbedded {
 		t.Fatalf("skill_activated = %+v, want kspec-prd from the embedded source", activation)
 	}
+}
+
+func TestActivateModeSquad(t *testing.T) {
+	squadStore := squad.Load()
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squadStore)
+
+	if got := ag.Mode(); got != "sdd" {
+		t.Fatalf("default mode = %q, want sdd", got)
+	}
+
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	if got := ag.Mode(); got != "squad" {
+		t.Fatalf("mode = %q, want squad", got)
+	}
+	if ag.systemPrompt == "" {
+		t.Fatal("system prompt empty after activating squad")
+	}
+	if !strings.Contains(ag.systemPrompt, "maestro") && !strings.Contains(ag.systemPrompt, "squad") {
+		t.Fatalf("system prompt does not contain maestro/squad content")
+	}
+
+	if err := ag.ActivateMode("sdd"); err != nil {
+		t.Fatalf("activate sdd: %v", err)
+	}
+	if got := ag.Mode(); got != "sdd" {
+		t.Fatalf("mode = %q, want sdd", got)
+	}
+}
+
+func TestActivateModeInvalid(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	if err := ag.ActivateMode("invalid"); err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+}
+
+func TestRestoreSkillPreservesSquadPrompt(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachKspec(kspec.Load())
+	ag.AttachSquad(squad.Load())
+
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	maestroPrompt := ag.systemPrompt
+	if maestroPrompt == "" {
+		t.Fatal("maestro prompt empty after activating squad")
+	}
+
+	ag.RestoreSkill("kspec-prd")
+	if ag.systemPrompt != maestroPrompt {
+		t.Fatalf("RestoreSkill clobbered the squad maestro prompt")
+	}
+	if got := ag.Mode(); got != "squad" {
+		t.Fatalf("mode = %q, want squad", got)
+	}
+
+	if err := ag.ActivateMode("sdd"); err != nil {
+		t.Fatalf("activate sdd: %v", err)
+	}
+	if ag.systemPrompt == maestroPrompt {
+		t.Fatal("switching to sdd kept the maestro prompt")
+	}
+	if !strings.Contains(ag.systemPrompt, "kterminal") {
+		t.Fatalf("sdd system prompt missing base content")
+	}
+}
+
+func TestEnqueueUserMessage(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+
+	ag.EnqueueUserMessage("first")
+	ag.EnqueueUserMessage("second")
+
+	msgs := ag.drainUserQueue()
+	if len(msgs) != 2 || msgs[0] != "first" || msgs[1] != "second" {
+		t.Fatalf("drained = %v, want [first second]", msgs)
+	}
+
+	if msgs := ag.drainUserQueue(); len(msgs) != 0 {
+		t.Fatalf("second drain = %v, want empty", msgs)
+	}
+}
+
+func TestStepLimitSquadMode(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.mode = "squad"
+	if got := ag.stepLimit(); got != skillMaxSteps {
+		t.Fatalf("stepLimit in squad = %d, want %d", got, skillMaxSteps)
+	}
+}
+
+func TestEventAgentField(t *testing.T) {
+	ev := Event{Kind: EventDelta, Agent: "architect"}
+	if ev.Agent != "architect" {
+		t.Fatalf("agent field = %q, want architect", ev.Agent)
+	}
+}
+
+func TestRunSyncPersonaSetsAgentName(t *testing.T) {
+	cat := testCatalog(t)
+	gw := mockGateway(t, [][]string{contentChunks("architect says hello", 10, 3)})
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+
+	jevClient := jev.New("test-key")
+	jevClient.BaseURL = jevSrv.URL
+	ag := New(
+		llm.New(gw.URL, "gw-key", false),
+		router.NewJev(jevClient),
+		&router.HeuristicRouter{Default: cat.DefaultModel},
+		cat,
+		tools.NewRegistry(),
+		nil,
+		false,
+	)
+
+	squadStore := squad.Load()
+	persona, err := squadStore.Resolve("architect")
+	if err != nil {
+		t.Fatalf("resolve architect: %v", err)
+	}
+
+	ctx := context.Background()
+	text, err := ag.RunSyncPersona(ctx, persona, "review the code", "", "", tools.NewRegistry())
+	if err != nil {
+		t.Fatalf("RunSyncPersona: %v", err)
+	}
+	if !strings.Contains(text, "architect says hello") {
+		t.Fatalf("text = %q, want architect says hello", text)
+	}
+}
+
+func TestConvokePersonaWithoutKickoffFails(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+
+	_, err := ag.convokePersona(context.Background(), "architect", "review the design", "")
+	if err == nil {
+		t.Fatal("expected error without a registered kickoff")
+	}
+	if !strings.Contains(err.Error(), "squad_kickoff") {
+		t.Fatalf("error = %q, want an instruction to call squad_kickoff first", err.Error())
+	}
+}
+
+func TestConvokePersonaUnknownRoleFails(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect", "qa"}, MaxConvocations: 4, TokenBudget: 100000})
+
+	_, err := ag.convokePersona(context.Background(), "frontend", "review the design", "")
+	if err == nil {
+		t.Fatal("expected error for a persona not in the mesa")
+	}
+	if !strings.Contains(err.Error(), "frontend") {
+		t.Fatalf("error = %q, want it to mention the offending persona", err.Error())
+	}
+}
+
+func TestConvokePersonaExceedsConvocationLimit(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 2, TokenBudget: 100000})
+	ag.turnConvocations = 2
+
+	_, err := ag.convokePersona(context.Background(), "architect", "review", "")
+	if err == nil {
+		t.Fatal("expected error when the convocation limit is reached")
+	}
+	if !strings.Contains(err.Error(), "convocation limit") {
+		t.Fatalf("error = %q, want a convocation limit signal", err.Error())
+	}
+}
+
+func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000})
+	ag.turnTokens = 1000
+
+	_, err := ag.convokePersona(context.Background(), "architect", "review", "")
+	if err == nil {
+		t.Fatal("expected error when the token budget is exhausted")
+	}
+	if !strings.Contains(err.Error(), "token budget") {
+		t.Fatalf("error = %q, want a token budget signal", err.Error())
+	}
+}
+
+func TestSquadKickoffToolRegistered(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachSquadKickoffTool()
+
+	if !hasTool(ag.Tools.Definitions(), tools.SquadKickoffToolName) {
+		t.Fatalf("tools = %v, want %s registered", toolNames(ag.Tools.Definitions()), tools.SquadKickoffToolName)
+	}
+}
+
+func TestPersonaRegistryIsReadOnly(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	reg := ag.personaRegistry()
+	if hasTool(reg.Definitions(), "write") || hasTool(reg.Definitions(), "edit") || hasTool(reg.Definitions(), "bash") {
+		t.Fatalf("persona registry = %v, want read-only tools only", toolNames(reg.Definitions()))
+	}
+	if !hasTool(reg.Definitions(), "read") {
+		t.Fatalf("persona registry = %v, want read", toolNames(reg.Definitions()))
+	}
+}
+
+func TestPersonaRulesSubsetByDiscipline(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachKspec(kspec.Load())
+	persona, err := squad.Load().Resolve("architect")
+	if err != nil {
+		t.Fatalf("resolve architect: %v", err)
+	}
+	rules := ag.personaRules(persona)
+	for _, r := range rules {
+		if len(r.Disciplines) == 0 {
+			t.Fatalf("rule %q has no disciplines but was included in the persona subset", r.Name)
+		}
+	}
+}
+
+func TestPersonaPromptIncludesPersonaBody(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	persona, err := squad.Load().Resolve("backend")
+	if err != nil {
+		t.Fatalf("resolve backend: %v", err)
+	}
+	prompt := ag.buildPersonaPrompt(persona)
+	if !strings.Contains(prompt, persona.Prompt) {
+		t.Fatal("persona prompt does not include the persona body")
+	}
+}
+
+func TestTaskToolConvenesPersonas(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect","backend"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskToolName, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("architect contribution", 10, 2),
+		toolCallChunks("call_2", taskToolName, `{"description":"assess the implementation","persona":"backend"}`),
+		contentChunks("backend contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+
+	ag.Run("design the squad feature")
+	events := collectParentTurnEvents(t, ag)
+
+	if len(calls) != 6 {
+		t.Fatalf("gateway calls = %d, want 6 (kickoff, 2 convocations, parent)", len(calls))
+	}
+	if ag.Kickoff() == nil {
+		t.Fatal("kickoff was not registered by the tool")
+	}
+	if ag.turnConvocations != 2 {
+		t.Fatalf("turnConvocations = %d, want 2", ag.turnConvocations)
+	}
+	roles := map[string]bool{}
+	for _, e := range events {
+		if e.Depth == 1 && e.Kind == EventTurnDone {
+			roles[e.Agent] = true
+		}
+	}
+	if !roles["architect"] || !roles["backend"] {
+		t.Fatalf("subagent contributions = %v, want architect and backend labelled", roles)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventTurnDone || last.Depth != 0 {
+		t.Fatalf("last event = %+v, want the parent turn_done", last)
+	}
+}
+
+func TestConvocationsAccumulateIntoTokenBudget(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_0", tools.SquadKickoffToolName, `{"roles":["architect"],"max_convocations":4,"token_budget":100000,"exit_criterion":"all agree"}`),
+		toolCallChunks("call_1", taskToolName, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("architect contribution", 10, 2),
+		contentChunks("plan converged", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+
+	ag.Run("design the squad feature")
+	collectParentTurnEvents(t, ag)
+
+	// kickoff call 15 + parent task call 15 + subagent 12 + final parent call 21.
+	// The subagent usage must accumulate into the parent turn budget so the
+	// ceiling is measured across every LLM call in the turn.
+	if ag.turnTokens != 63 {
+		t.Fatalf("turnTokens = %d, want 63 (convocation usage must accumulate into the parent budget)", ag.turnTokens)
+	}
+}
+
+func TestTaskToolPersonaWithoutKickoffFailsInline(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_1", taskToolName, `{"description":"review the design","persona":"architect"}`),
+		contentChunks("no kickoff, converge", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+
+	ag.Run("try to convene without kickoff")
+	events := collectParentTurnEvents(t, ag)
+
+	var taskResult *Event
+	for i, e := range events {
+		if e.Kind == EventToolResult && e.Tool == taskToolName {
+			taskResult = &events[i]
+		}
+	}
+	if taskResult == nil {
+		t.Fatal("no tool_result event for task")
+	}
+	if !strings.Contains(taskResult.Result, "squad_kickoff") {
+		t.Fatalf("task result = %q, want an instruction to call squad_kickoff first", taskResult.Result)
+	}
+}
+
+func TestPersonaRulesSubsetFiltersEmbeddedWithoutDisciplines(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".agents", "rules")
+	if err := os.MkdirAll(rulesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goRule := "---\ndisciplines: [backend, architecture]\n---\n# Go\ngofmt, no comments.\n"
+	if err := os.WriteFile(filepath.Join(rulesDir, "go.md"), []byte(goRule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pyRule := "---\ndisciplines: [data-science]\n---\n# Python\n"
+	if err := os.WriteFile(filepath.Join(rulesDir, "python.md"), []byte(pyRule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(orig) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachKspec(kspec.Load())
+	persona, err := squad.Load().Resolve("architect")
+	if err != nil {
+		t.Fatalf("resolve architect: %v", err)
+	}
+	rules := ag.personaRules(persona)
+	if len(rules) != 1 || rules[0].Name != "go" {
+		t.Fatalf("persona rules = %v, want only the go rule", ruleNames(rules))
+	}
+}
+
+func ruleNames(rules []kspec.Rule) []string {
+	out := make([]string, len(rules))
+	for i, r := range rules {
+		out[i] = r.Name
+	}
+	return out
 }
