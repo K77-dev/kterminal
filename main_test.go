@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"kterminal/internal/catalog"
+	"kterminal/internal/config"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
 	"kterminal/internal/telemetry"
@@ -227,6 +228,36 @@ func TestDoctorPrintsTelemetryTable(t *testing.T) {
 		if !strings.Contains(out, wantRow) {
 			t.Fatalf("table missing row %q:\n%s", wantRow, out)
 		}
+	}
+}
+
+func TestDoctorLimitsLines(t *testing.T) {
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "kterminal"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	content := `
+[llm]
+idle_timeout = "90s"
+
+[agent]
+subagent_timeout = "2m"
+`
+	if err := os.WriteFile(filepath.Join(xdg, "kterminal", "config.toml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	out := doctorLimitsLines(cfg)
+
+	want := "  llm timeouts: first byte 1m0s, idle 1m30s, total 10m0s, retries 2\n" +
+		"  agent: subagent stall 2m0s\n"
+	if out != want {
+		t.Fatalf("limits lines = %q, want %q", out, want)
 	}
 }
 

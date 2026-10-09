@@ -72,6 +72,12 @@ func main() {
 	var llmClient *llm.Client
 	if cfg.Ready() {
 		llmClient = llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.SkipTLSVerify)
+		llmClient.SetLimits(llm.Limits{
+			RequestTimeout:   cfg.LLM.RequestTimeoutDuration,
+			IdleTimeout:      cfg.LLM.IdleTimeoutDuration,
+			FirstByteTimeout: cfg.LLM.FirstByteTimeoutDuration,
+			MaxRetries:       cfg.LLM.MaxRetries,
+		})
 	}
 	var jevRouter, fallback router.Router
 	if cfg.Typesafe.APIKey != "" {
@@ -92,6 +98,7 @@ func main() {
 	ag.AttachSquad(squadStore)
 	ag.SetSquadPins(cfg.Squad.Pins)
 	ag.SetSquadLimits(squad.Limits{MaxConvocations: cfg.Squad.MaxConvocations, TokenBudget: cfg.Squad.TokenBudget})
+	ag.SetSubagentTimeout(cfg.Agent.SubagentTimeoutDuration)
 	ag.AttachTaskTool()
 	ag.AttachSquadKickoffTool()
 	ag.AttachAskUserTool()
@@ -184,6 +191,7 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	fmt.Printf("  llm base url: %s\n", display(cfg.LLM.BaseURL))
 	fmt.Printf("  llm api key: %s\n", display(cfg.LLM.APIKey))
 	fmt.Printf("  skip tls verify: %v\n", cfg.LLM.SkipTLSVerify)
+	fmt.Print(doctorLimitsLines(cfg))
 	fmt.Printf("  typesafe api key: %s\n", display(cfg.Typesafe.APIKey))
 	fmt.Println()
 
@@ -200,6 +208,12 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		client := llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.SkipTLSVerify)
+		client.SetLimits(llm.Limits{
+			RequestTimeout:   cfg.LLM.RequestTimeoutDuration,
+			IdleTimeout:      cfg.LLM.IdleTimeoutDuration,
+			FirstByteTimeout: cfg.LLM.FirstByteTimeoutDuration,
+			MaxRetries:       cfg.LLM.MaxRetries,
+		})
 		remote, err := client.ListModels(ctx)
 		cancel()
 		if err != nil {
@@ -248,6 +262,14 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 		os.Exit(1)
 	}
 	fmt.Println("all checks passed")
+}
+
+func doctorLimitsLines(cfg *config.Config) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  llm timeouts: first byte %s, idle %s, total %s, retries %d\n",
+		cfg.LLM.FirstByteTimeoutDuration, cfg.LLM.IdleTimeoutDuration, cfg.LLM.RequestTimeoutDuration, cfg.LLM.MaxRetries)
+	fmt.Fprintf(&b, "  agent: subagent stall %s\n", cfg.Agent.SubagentTimeoutDuration)
+	return b.String()
 }
 
 func doctorKspecSection(store *kspec.Store) string {

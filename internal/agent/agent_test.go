@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1057,7 +1058,7 @@ func failingChatGateway(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", modelsHandler(t))
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -1480,9 +1481,10 @@ func TestSummaryFailureAbortsCompactionSilently(t *testing.T) {
 	cases := []struct {
 		name          string
 		summaryChunks []string
+		wantCalls     int
 	}{
-		{"gateway error", nil},
-		{"empty summary", contentChunks("", 5, 2)},
+		{"gateway error", nil, 4},
+		{"empty summary", contentChunks("", 5, 2), 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1507,14 +1509,15 @@ func TestSummaryFailureAbortsCompactionSilently(t *testing.T) {
 			ag.Run("final question")
 			events := collectEvents(t, ag)
 
-			if len(calls) != 2 {
-				t.Fatalf("gateway calls = %d, want 2 (failed summary + main call)", len(calls))
+			if len(calls) != tc.wantCalls {
+				t.Fatalf("gateway calls = %d, want %d", len(calls), tc.wantCalls)
 			}
-			if len(calls[1].Messages) != 7 {
-				t.Fatalf("main call sent %d messages, want 7 (truncation shortens content, never drops messages)", len(calls[1].Messages))
+			main := calls[tc.wantCalls-1]
+			if len(main.Messages) != 7 {
+				t.Fatalf("main call sent %d messages, want 7 (truncation shortens content, never drops messages)", len(main.Messages))
 			}
 			var toolContent string
-			for _, m := range calls[1].Messages {
+			for _, m := range main.Messages {
 				if m.Role == "tool" {
 					toolContent = m.Content
 				}
@@ -1563,10 +1566,10 @@ func TestTruncationRescuesGiantToolResult(t *testing.T) {
 	ag.Run("final question")
 	events := collectEvents(t, ag)
 
-	if len(calls) != 2 {
-		t.Fatalf("gateway calls = %d, want 2 (failed summary + rescued main call)", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("gateway calls = %d, want 4 (3 retried summary attempts + rescued main call)", len(calls))
 	}
-	main := calls[1]
+	main := calls[3]
 	var toolContent string
 	for _, m := range main.Messages {
 		if m.Role == "tool" {
@@ -2896,6 +2899,58 @@ func subagentBlockGateway(t *testing.T, blockOn int, partial string, responses [
 	return srv
 }
 
+func subagentSlowStreamGateway(t *testing.T, deltas []string, spacing time.Duration, responses [][]string, calls *[]chatCall) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", modelsHandler(t))
+	var call int
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model    string        `json:"model"`
+			Messages []llm.Message `json:"messages"`
+			Tools    []llm.Tool    `json:"tools"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		*calls = append(*calls, chatCall{Model: body.Model, Messages: body.Messages, Tools: body.Tools})
+		idx := call
+		call++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		if idx == 1 {
+			for _, d := range deltas {
+				chunk := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":%s}}]}`, mustJSON(d))
+				fmt.Fprintf(w, "data: %s\n\n", chunk)
+				flusher.Flush()
+				time.Sleep(spacing)
+			}
+			finish := fmt.Sprintf(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":%d}}`, len(deltas))
+			fmt.Fprintf(w, "data: %s\n\n", finish)
+			flusher.Flush()
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+		respIdx := idx
+		if idx > 1 {
+			respIdx--
+		}
+		if respIdx >= len(responses) {
+			t.Errorf("unexpected chat call %d", idx)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		for _, c := range responses[respIdx] {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func stateRoutingJev(t *testing.T, marker, markerChoice, defaultChoice string, states *[]string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -3129,7 +3184,7 @@ func TestSubagentTimeout(t *testing.T) {
 	}, &calls)
 	jevSrv := mockJev(t, "glm-5.3", 0.9)
 	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
-	ag.subagentTimeout = 50 * time.Millisecond
+	ag.subagentTimeout = 100 * time.Millisecond
 	ag.AttachTaskTool()
 
 	ag.Run("delegate slow work")
@@ -3148,14 +3203,91 @@ func TestSubagentTimeout(t *testing.T) {
 	if taskResult == nil {
 		t.Fatal("no tool_result for task")
 	}
-	if taskResult.Result != "error: subtask timed out after 5m" {
-		t.Fatalf("task result = %q, want the timeout error as result", taskResult.Result)
+	want := fmt.Sprintf("error: subtask stalled for %s without progress", 100*time.Millisecond)
+	if taskResult.Result != want {
+		t.Fatalf("task result = %q, want %q", taskResult.Result, want)
 	}
 	if subAbort == nil {
 		t.Fatal("no turn_aborted event from the subagent (depth 1)")
 	}
 	if !strings.Contains(subAbort.Text, "subagent is thinking") {
-		t.Fatalf("subagent abort text = %q, want the partial streamed before the timeout", subAbort.Text)
+		t.Fatalf("subagent abort text = %q, want the partial streamed before the stall", subAbort.Text)
+	}
+}
+
+func TestSubagentStallWatchdogResetByProgress(t *testing.T) {
+	window := 250 * time.Millisecond
+	spacing := 50 * time.Millisecond
+	deltas := make([]string, 13)
+	for i := range deltas {
+		deltas[i] = "x"
+	}
+	var calls []chatCall
+	gw := subagentSlowStreamGateway(t, deltas, spacing, [][]string{
+		toolCallChunks("call_1", "task", `{"description":"stream slowly but steadily"}`),
+		contentChunks("parent got the full answer", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.subagentTimeout = window
+	ag.AttachTaskTool()
+
+	start := time.Now()
+	ag.Run("delegate slow steady work")
+	events := collectParentTurnEvents(t, ag)
+	elapsed := time.Since(start)
+
+	if elapsed < 12*spacing {
+		t.Fatalf("elapsed = %s, want the subagent to stream past the stall window %s", elapsed, window)
+	}
+	var taskResult *Event
+	for i, e := range events {
+		if e.Kind == EventTurnAborted && e.Depth == 1 {
+			t.Fatalf("subagent aborted despite continuous progress: %+v", e)
+		}
+		if e.Kind == EventToolResult && e.Tool == taskToolName {
+			taskResult = &events[i]
+		}
+	}
+	if taskResult == nil {
+		t.Fatal("no tool_result for task")
+	}
+	want := strings.Repeat("x", len(deltas))
+	if taskResult.Result != want {
+		t.Fatalf("task result = %q, want the full streamed answer %q", taskResult.Result, want)
+	}
+}
+
+func TestSubagentParentCancelPropagatesAbort(t *testing.T) {
+	var calls []chatCall
+	gw := subagentBlockGateway(t, 0, "subagent partial work", [][]string{
+		contentChunks("unused", 10, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.subagentTimeout = 10 * time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type subagentResult struct {
+		text string
+		err  error
+	}
+	done := make(chan subagentResult, 1)
+	go func() {
+		text, err := ag.RunSync(ctx, "long running subtask", "")
+		done <- subagentResult{text, err}
+	}()
+	delta := waitForDepthEvent(t, ag.Events, EventDelta, 1)
+	if delta.ParentTool != taskToolName {
+		t.Fatalf("subagent delta parent tool = %q, want task", delta.ParentTool)
+	}
+	cancel()
+	res := <-done
+	if res.text != "" {
+		t.Fatalf("subagent text = %q, want empty on parent cancel", res.text)
+	}
+	if !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("subagent error = %v, want context.Canceled (abort, not stall)", res.err)
 	}
 }
 

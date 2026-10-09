@@ -1235,6 +1235,12 @@ func (m *Model) rebuildAgent() {
 	var llmClient *llm.Client
 	if m.cfg.Ready() {
 		llmClient = llm.New(m.cfg.LLM.BaseURL, m.cfg.LLM.APIKey, m.cfg.LLM.SkipTLSVerify)
+		llmClient.SetLimits(llm.Limits{
+			RequestTimeout:   m.cfg.LLM.RequestTimeoutDuration,
+			IdleTimeout:      m.cfg.LLM.IdleTimeoutDuration,
+			FirstByteTimeout: m.cfg.LLM.FirstByteTimeoutDuration,
+			MaxRetries:       m.cfg.LLM.MaxRetries,
+		})
 	}
 	var jevRouter, fallback router.Router
 	if m.cfg.Typesafe.APIKey != "" {

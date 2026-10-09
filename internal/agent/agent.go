@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"kterminal/internal/catalog"
@@ -21,7 +22,7 @@ import (
 const maxSteps = 50
 const skillMaxSteps = 100
 const subagentMaxSteps = 20
-const subagentTimeout = 5 * time.Minute
+const subagentTimeout = 10 * time.Minute
 const taskToolName = "task"
 const subagentSystemPrompt = "You are a subagent handling a focused subtask for a parent agent. Be concise; return only the final result."
 const maxStateChars = 4000
@@ -151,6 +152,8 @@ func (a *Agent) SetRouters(r router.Router, fallback router.Router) {
 	a.Router = r
 	a.Fallback = fallback
 }
+
+func (a *Agent) SetSubagentTimeout(d time.Duration) { a.subagentTimeout = d }
 
 func (a *Agent) Reset() {
 	a.messages = nil
@@ -366,12 +369,20 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	if timeout <= 0 {
 		timeout = subagentTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	var stalled atomic.Bool
+	watchdog := newStallWatchdog(timeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer watchdog.stop()
 
 	drained := make(chan struct{})
 	go func() {
 		for ev := range sub.Events {
+			watchdog.reset()
 			ev.Depth = sub.depth
 			ev.ParentTool = taskToolName
 			if sub.agentName != "" {
@@ -385,22 +396,67 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	if err := sub.ensureCandidates(ctx); err != nil {
 		close(sub.Events)
 		<-drained
+		watchdog.stop()
+		if stalled.Load() {
+			return fmt.Sprintf("error: subtask stalled for %s without progress", timeout), nil
+		}
 		return "", err
 	}
 	text, err := sub.runLoop(ctx)
 	a.turnTokens += sub.turnTokens
 	close(sub.Events)
 	<-drained
+	watchdog.stop()
 	if err != nil {
 		if errors.Is(err, errMaxSteps) {
 			return fmt.Sprintf("error: subtask exceeded max steps (%d)", subagentMaxSteps), nil
 		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return "error: subtask timed out after 5m", nil
+		if stalled.Load() {
+			return fmt.Sprintf("error: subtask stalled for %s without progress", timeout), nil
 		}
 		return "", err
 	}
 	return text, nil
+}
+
+type stallWatchdog struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	window time.Duration
+	fire   func()
+	done   bool
+}
+
+func newStallWatchdog(window time.Duration, fire func()) *stallWatchdog {
+	w := &stallWatchdog{window: window, fire: fire}
+	w.timer = time.AfterFunc(window, w.trigger)
+	return w
+}
+
+func (w *stallWatchdog) trigger() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return
+	}
+	w.done = true
+	w.fire()
+}
+
+func (w *stallWatchdog) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return
+	}
+	w.timer.Reset(w.window)
+}
+
+func (w *stallWatchdog) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.done = true
+	w.timer.Stop()
 }
 
 func (a *Agent) newSubagent(description, guidance string) *Agent {
