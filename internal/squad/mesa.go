@@ -62,6 +62,12 @@ func (m *Mesa) AddTokens(n int64) {
 	m.Tokens += n
 }
 
+func (m *Mesa) SpentTokens() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Tokens
+}
+
 func (m *Mesa) AddConvocation() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

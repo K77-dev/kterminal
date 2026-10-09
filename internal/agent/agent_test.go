@@ -4412,8 +4412,15 @@ func TestConvokePersonaExceedsConvocationLimit(t *testing.T) {
 func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachSquad(squad.Load())
-	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000})
-	ag.turnTokens = 1000
+	k := squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000}
+	ag.RegisterKickoff(k)
+	ag.RestoreMesa(&squad.Mesa{
+		Roles:           k.Roles,
+		MaxConvocations: k.MaxConvocations,
+		TokenBudget:     k.TokenBudget,
+		Tokens:          1000,
+		Entries:         []squad.MesaEntry{{Name: "architect", Status: squad.StatusDone}},
+	})
 
 	_, err := ag.convokePersona(context.Background(), "architect", "review", "")
 	if err == nil {
@@ -4424,7 +4431,7 @@ func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
 	}
 }
 
-func TestConvokePersonaNotBlockedByPreKickoffExploration(t *testing.T) {
+func TestConvokePersonaNotBlockedByMaestroOverhead(t *testing.T) {
 	var calls []chatCall
 	gw := taskFlowGateway(t, [][]string{contentChunks("architect contribution", 10, 2)}, &calls)
 	jevSrv := mockJev(t, "glm-5.3", 0.9)
@@ -4435,22 +4442,23 @@ func TestConvokePersonaNotBlockedByPreKickoffExploration(t *testing.T) {
 	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000})
 
 	if got := ag.Mesa().Tokens; got != 0 {
-		t.Fatalf("mesa tokens right after kickoff = %d, want 0 (pre-kickoff exploration is the baseline, not mesa consumption)", got)
-	}
-	if ag.mesaTokenBase != 5000 {
-		t.Fatalf("mesa token baseline = %d, want 5000 captured at kickoff", ag.mesaTokenBase)
+		t.Fatalf("mesa tokens right after kickoff = %d, want 0 (maestro overhead is not mesa consumption)", got)
 	}
 
 	text, err := ag.convokePersona(context.Background(), "architect", "review", "")
 	if err != nil {
-		t.Fatalf("convocation must proceed past the budget check (mesa budget counts consumption from the kickoff onward): %v", err)
+		t.Fatalf("convocation must proceed past the budget check (mesa budget counts only persona consumption): %v", err)
 	}
 	if !strings.Contains(text, "architect contribution") {
 		t.Fatalf("convocation text = %q, want the persona contribution", text)
 	}
-	entry := mesaEntryByName(t, ag.Mesa(), "architect")
+	m := ag.Mesa()
+	entry := mesaEntryByName(t, m, "architect")
 	if entry.Status != squad.StatusDone {
 		t.Fatalf("architect status = %q, want done after the convocation", entry.Status)
+	}
+	if m.Tokens != 12 {
+		t.Fatalf("mesa tokens = %d, want 12 (only the persona convocation usage)", m.Tokens)
 	}
 }
 
@@ -4929,8 +4937,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 	if m.Convocations != 1 {
 		t.Fatalf("convocations = %d, want 1 mid-convocation", m.Convocations)
 	}
-	if m.Tokens != 15 || m.Tokens != ag.turnTokens-ag.mesaTokenBase {
-		t.Fatalf("tokens = %d, want 15 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	if m.Tokens != 0 {
+		t.Fatalf("tokens = %d, want 0 during the convocation (persona tokens in flight only land at its return; maestro calls are not mesa consumption)", m.Tokens)
 	}
 	gates[2].open()
 
@@ -4957,8 +4965,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 	if archEntry.Model != "glm-5.3" || archEntry.Tokens != 12 || archEntry.Cost != archCost {
 		t.Fatalf("architect entry = %+v, want glm-5.3 with 12 tokens and cost %v", archEntry, archCost)
 	}
-	if m.Convocations != 1 || m.Tokens != 27 {
-		t.Fatalf("counters = %d/%d, want 1/27 after the first convocation", m.Convocations, m.Tokens)
+	if m.Convocations != 1 || m.Tokens != 12 {
+		t.Fatalf("counters = %d/%d, want 1/12 after the first convocation (persona usage only)", m.Convocations, m.Tokens)
 	}
 	gates[3].open()
 
@@ -4995,8 +5003,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 	if backEntry.Tokens != 15 || backEntry.Cost != bashCost {
 		t.Fatalf("backend entry = %+v, want live metrics 15 tokens and cost %v", backEntry, bashCost)
 	}
-	if m.Tokens != 42 || m.Tokens != ag.turnTokens-ag.mesaTokenBase {
-		t.Fatalf("tokens = %d, want 42 equal to mesa consumption (turnTokens %d - base %d; subagent tokens in flight only land at its return)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	if m.Tokens != 12 {
+		t.Fatalf("tokens = %d, want 12 (only the landed persona usage; backend tokens in flight only land at its return)", m.Tokens)
 	}
 	gates[5].open()
 
@@ -5020,8 +5028,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 	if backEntry.Tokens != 27 || backEntry.Cost != bashCost+backendCost {
 		t.Fatalf("backend entry = %+v, want 27 tokens and cost %v", backEntry, bashCost+backendCost)
 	}
-	if m.Tokens != 69 {
-		t.Fatalf("tokens = %d, want 69 after the second convocation", m.Tokens)
+	if m.Tokens != 39 {
+		t.Fatalf("tokens = %d, want 39 after the second convocation (12 + 27 persona usage)", m.Tokens)
 	}
 	gates[6].open()
 
@@ -5035,8 +5043,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 			t.Fatalf("entry %q status = %q, want done at convergence", e.Name, e.Status)
 		}
 	}
-	if m.Tokens != ag.turnTokens-ag.mesaTokenBase || m.Tokens != 90 {
-		t.Fatalf("mesa tokens = %d, want 90 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	if m.Tokens != 39 {
+		t.Fatalf("mesa tokens = %d, want 39 (sum of the persona convocation usage)", m.Tokens)
 	}
 	if m.Convocations != ag.turnConvocations || m.Convocations != 2 {
 		t.Fatalf("mesa convocations = %d, want 2 equal to turnConvocations %d", m.Convocations, ag.turnConvocations)
@@ -5050,7 +5058,7 @@ func TestSquadMesaFullCycle(t *testing.T) {
 		t.Fatalf("activate squad: %v", err)
 	}
 	m = ag.Mesa()
-	if len(m.Entries) != 2 || m.Tokens != 90 || m.Convocations != 2 {
+	if len(m.Entries) != 2 || m.Tokens != 39 || m.Convocations != 2 {
 		t.Fatalf("mesa after the mode toggle = %d/%d with %d entries, want the converged state preserved", m.Tokens, m.Convocations, len(m.Entries))
 	}
 
@@ -5059,8 +5067,8 @@ func TestSquadMesaFullCycle(t *testing.T) {
 	if m.Tokens != 0 || m.Convocations != 0 {
 		t.Fatalf("mesa counters after Reset = %d/%d, want 0/0 mirroring the turn counters", m.Tokens, m.Convocations)
 	}
-	if ag.turnTokens != 0 || ag.turnConvocations != 0 || ag.mesaTokenBase != 0 {
-		t.Fatalf("turn counters after Reset = %d/%d (base %d), want 0/0/0", ag.turnTokens, ag.turnConvocations, ag.mesaTokenBase)
+	if ag.turnTokens != 0 || ag.turnConvocations != 0 {
+		t.Fatalf("turn counters after Reset = %d/%d, want 0/0", ag.turnTokens, ag.turnConvocations)
 	}
 	if len(m.Entries) != 2 {
 		t.Fatalf("entries after Reset = %d, want 2 preserved", len(m.Entries))
@@ -5165,8 +5173,8 @@ func TestSecondConvocationAccumulatesOverBaseline(t *testing.T) {
 	if m.Convocations != 2 || m.Convocations != ag.turnConvocations {
 		t.Fatalf("convocations = %d, want 2 equal to turnConvocations %d", m.Convocations, ag.turnConvocations)
 	}
-	if m.Tokens != ag.turnTokens-ag.mesaTokenBase || m.Tokens != 75 {
-		t.Fatalf("mesa tokens = %d, want 75 equal to mesa consumption (turnTokens %d - base %d)", m.Tokens, ag.turnTokens, ag.mesaTokenBase)
+	if m.Tokens != 24 {
+		t.Fatalf("mesa tokens = %d, want 24 (sum of the two persona convocations)", m.Tokens)
 	}
 }
 
@@ -5200,8 +5208,8 @@ func TestSquadMesaAbortMarksDeliberatingDone(t *testing.T) {
 	if got := mesaEntryByName(t, m, "architect"); got.Status != squad.StatusDone {
 		t.Fatalf("architect status = %q, want done after the aborted convocation", got.Status)
 	}
-	if m.Tokens != ag.turnTokens-ag.mesaTokenBase {
-		t.Fatalf("mesa tokens = %d, want %d equal to mesa consumption after the abort", m.Tokens, ag.turnTokens-ag.mesaTokenBase)
+	if m.Tokens != 0 {
+		t.Fatalf("mesa tokens = %d, want 0 after the abort (no persona usage landed)", m.Tokens)
 	}
 
 	var snapshot map[string]any
@@ -5217,8 +5225,11 @@ func TestSquadMesaAbortMarksDeliberatingDone(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot has no mesa: %+v", snapshot)
 	}
-	if mesaJSON["convocations"] != float64(1) || mesaJSON["tokens"] != float64(15) {
-		t.Fatalf("snapshot mesa counters = %v/%v, want 1/15", mesaJSON["convocations"], mesaJSON["tokens"])
+	if mesaJSON["convocations"] != float64(1) {
+		t.Fatalf("snapshot mesa convocations = %v, want 1", mesaJSON["convocations"])
+	}
+	if _, ok := mesaJSON["tokens"]; ok {
+		t.Fatalf("snapshot mesa tokens = %v, want omitted (no persona usage landed, omitempty)", mesaJSON["tokens"])
 	}
 	entries, ok := mesaJSON["entries"].([]any)
 	if !ok || len(entries) != 1 {
@@ -5351,14 +5362,14 @@ func TestSquadMesaConcurrentReadWrite(t *testing.T) {
 	wg.Wait()
 
 	m := ag.Mesa()
-	if m.Tokens != ag.turnTokens-ag.mesaTokenBase {
-		t.Fatalf("mesa tokens = %d, want %d equal to mesa consumption after concurrent access", m.Tokens, ag.turnTokens-ag.mesaTokenBase)
+	if m.Tokens != 24 {
+		t.Fatalf("mesa tokens = %d, want 24 (sum of the persona convocations) after concurrent access", m.Tokens)
 	}
 	if m.Convocations != ag.turnConvocations {
 		t.Fatalf("mesa convocations = %d, want %d equal to turnConvocations after concurrent access", m.Convocations, ag.turnConvocations)
 	}
-	if m.Tokens != 75 || m.Convocations != 2 {
-		t.Fatalf("mesa counters = %d/%d, want 75/2", m.Tokens, m.Convocations)
+	if m.Tokens != 24 || m.Convocations != 2 {
+		t.Fatalf("mesa counters = %d/%d, want 24/2", m.Tokens, m.Convocations)
 	}
 }
 
@@ -5396,8 +5407,8 @@ func TestSnapshotCarriesMesa(t *testing.T) {
 	if mesaJSON["convocations"] != float64(1) {
 		t.Fatalf("snapshot mesa convocations = %v, want 1", mesaJSON["convocations"])
 	}
-	if mesaJSON["tokens"] != float64(48) {
-		t.Fatalf("snapshot mesa tokens = %v, want 48", mesaJSON["tokens"])
+	if mesaJSON["tokens"] != float64(12) {
+		t.Fatalf("snapshot mesa tokens = %v, want 12", mesaJSON["tokens"])
 	}
 	entries, ok := mesaJSON["entries"].([]any)
 	if !ok || len(entries) != 1 {
@@ -5456,8 +5467,8 @@ func TestSquadResumeLoadLatestRestoresMesa(t *testing.T) {
 	collectParentTurnEvents(t, ag)
 
 	live := ag.Mesa()
-	if len(live.Entries) != 1 || live.Entries[0].Status != squad.StatusDone || live.Tokens != 48 || live.Convocations != 1 {
-		t.Fatalf("live mesa = %+v, want architect done with 48 tokens and 1 convocation", live)
+	if len(live.Entries) != 1 || live.Entries[0].Status != squad.StatusDone || live.Tokens != 12 || live.Convocations != 1 {
+		t.Fatalf("live mesa = %+v, want architect done with 12 tokens and 1 convocation", live)
 	}
 
 	sess.Close()
@@ -5510,7 +5521,7 @@ func TestSquadResumeLoadLatestRestoresMesa(t *testing.T) {
 		snap2.Mesa.TokenBudget != snap.Mesa.TokenBudget {
 		t.Fatalf("follow-up snapshot mesa header = %+v, want the restored header", snap2.Mesa)
 	}
-	if snap2.Mesa.Convocations != 0 || snap2.Mesa.Tokens != 11 {
-		t.Fatalf("follow-up snapshot counters = %d/%d, want 0/11 reset for the new turn", snap2.Mesa.Convocations, snap2.Mesa.Tokens)
+	if snap2.Mesa.Convocations != 0 || snap2.Mesa.Tokens != 0 {
+		t.Fatalf("follow-up snapshot counters = %d/%d, want 0/0 reset for the new turn", snap2.Mesa.Convocations, snap2.Mesa.Tokens)
 	}
 }

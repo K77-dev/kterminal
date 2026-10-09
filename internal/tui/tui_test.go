@@ -3162,7 +3162,7 @@ func TestSquadFlowSidebarIntegration(t *testing.T) {
 		return e.Kind == agent.EventRoute && e.Depth == 1 && e.Agent == "architect"
 	})
 	plain = stripANSI(m.View())
-	for _, want := range []string{"architect · deliberating", "1/4 convocations", "15/100.0k tokens"} {
+	for _, want := range []string{"architect · deliberating", "1/4 convocations", "0/100.0k tokens"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("panel missing %q during the convocation:\n%s", want, plain)
 		}
@@ -3183,7 +3183,7 @@ func TestSquadFlowSidebarIntegration(t *testing.T) {
 		return e.Kind == agent.EventTurnDone && e.Depth == 0
 	})
 	plain = stripANSI(m.View())
-	for _, want := range []string{"architect · done", "1/4 convocations", "48/100.0k tokens"} {
+	for _, want := range []string{"architect · done", "1/4 convocations", "12/100.0k tokens"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("panel missing %q after the squad turn:\n%s", want, plain)
 		}
@@ -3461,14 +3461,14 @@ func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
 	})
 
 	panel := stripANSI(m.sidebarView(m.sidebarWidth()))
-	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "75/100.0k tokens"} {
+	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "24/100.0k tokens"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("panel missing %q after the converged turn:\n%s", want, panel)
 		}
 	}
 	converged := ag.Mesa()
-	if converged.Tokens != 75 || converged.Convocations != 2 || len(converged.Entries) != 2 {
-		t.Fatalf("converged mesa = %+v, want 75 tokens, 2 convocations, 2 entries", converged)
+	if converged.Tokens != 24 || converged.Convocations != 2 || len(converged.Entries) != 2 {
+		t.Fatalf("converged mesa = %+v, want 24 tokens, 2 convocations, 2 entries", converged)
 	}
 
 	m.openModePopup()
@@ -3500,7 +3500,7 @@ func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
 		t.Fatalf("sidebar must reappear in squad:\n%s", plain)
 	}
 	panel = stripANSI(m.sidebarView(m.sidebarWidth()))
-	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "75/100.0k tokens"} {
+	for _, want := range []string{"architect · done", "backend · done", "2/4 convocations", "24/100.0k tokens"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("mesa not preserved across the mode toggle, missing %q:\n%s", want, panel)
 		}
@@ -3519,7 +3519,7 @@ func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
 	if strings.Contains(panel, "architect") || strings.Contains(panel, "backend") {
 		t.Fatalf("old personas leaked into the rebuilt mesa:\n%s", panel)
 	}
-	for _, want := range []string{"0/2 convocations", "21/50.0k tokens"} {
+	for _, want := range []string{"0/2 convocations", "0/50.0k tokens"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("rebuilt panel missing %q:\n%s", want, panel)
 		}
@@ -3531,8 +3531,8 @@ func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
 	if rebuilt.MaxConvocations != 2 || rebuilt.TokenBudget != 50000 {
 		t.Fatalf("rebuilt ceilings = %d/%d, want 2/50000 from the new kickoff", rebuilt.MaxConvocations, rebuilt.TokenBudget)
 	}
-	if rebuilt.Tokens != 21 || rebuilt.Convocations != 0 {
-		t.Fatalf("rebuilt counters = %d/%d, want 21/0 reset for the new turn", rebuilt.Tokens, rebuilt.Convocations)
+	if rebuilt.Tokens != 0 || rebuilt.Convocations != 0 {
+		t.Fatalf("rebuilt counters = %d/%d, want 0/0 reset for the new turn", rebuilt.Tokens, rebuilt.Convocations)
 	}
 	if got := lipgloss.Width(m.View()); got != 200-chatInset {
 		t.Fatalf("view width after the rekickoff = %d, want %d", got, 200-chatInset)
@@ -3616,7 +3616,7 @@ func TestSquadEscMidConvocationPanelReflectsFinalState(t *testing.T) {
 	}
 
 	panel = stripANSI(m.sidebarView(m.sidebarWidth()))
-	for _, want := range []string{"architect · done", "1/4 convocations", "15/100.0k tokens"} {
+	for _, want := range []string{"architect · done", "1/4 convocations", "0/100.0k tokens"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("panel must reflect the final mesa state after esc, missing %q:\n%s", want, panel)
 		}

@@ -120,7 +120,6 @@ type Agent struct {
 	userQueue         []string
 	turnConvocations  int
 	turnTokens        int64
-	mesaTokenBase     int64
 	kickoff           *squad.Kickoff
 	squadPins         map[string]string
 	squadLimits       squad.Limits
@@ -166,7 +165,6 @@ func (a *Agent) Reset() {
 	a.lastEstimateChars = 0
 	a.turnConvocations = 0
 	a.turnTokens = 0
-	a.mesaTokenBase = 0
 	if m := a.currentMesa(); m != nil {
 		m.ResetTurn()
 	}
@@ -230,7 +228,6 @@ func (a *Agent) RegisterKickoff(k squad.Kickoff) {
 		a.mesa = &squad.Mesa{}
 	}
 	m := a.mesa
-	a.mesaTokenBase = a.turnTokens
 	a.mu.Unlock()
 	convocations := a.turnConvocations
 	m.Reset(k, a.kickoffDisciplines(k))
@@ -481,7 +478,7 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	}
 	text, err := sub.runLoop(ctx)
 	a.turnTokens += sub.turnTokens
-	if m := a.currentMesa(); m != nil {
+	if m := a.currentMesa(); m != nil && sub.agentName != "" {
 		m.AddTokens(sub.turnTokens)
 	}
 	close(sub.Events)
@@ -624,7 +621,7 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 	if a.turnConvocations >= k.MaxConvocations {
 		return "", fmt.Errorf("mesa reached its convocation limit (%d): converge and hand off to execution", k.MaxConvocations)
 	}
-	if a.turnTokens-a.mesaTokenBase >= k.TokenBudget {
+	if m := a.currentMesa(); m != nil && m.SpentTokens() >= k.TokenBudget {
 		return "", fmt.Errorf("mesa reached its token budget (%d): converge and hand off to execution", k.TokenBudget)
 	}
 	persona, err := a.squadStore.Resolve(name)
@@ -733,7 +730,6 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 	if a.depth == 0 {
 		a.turnConvocations = 0
 		a.turnTokens = 0
-		a.mesaTokenBase = 0
 		if m := a.currentMesa(); m != nil {
 			m.ResetTurn()
 		}
@@ -818,9 +814,6 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 		a.lastEstimateChars = a.promptChars()
 		used := result.Usage.PromptTokens + result.Usage.CompletionTokens
 		a.turnTokens += used
-		if m := a.currentMesa(); m != nil {
-			m.AddTokens(used)
-		}
 		if ctx.Err() != nil && len(result.ToolCalls) > 0 {
 			a.abortTurn(decision.Model, &partial, nil)
 			return "", ctx.Err()
