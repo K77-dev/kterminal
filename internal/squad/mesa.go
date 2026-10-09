@@ -1,6 +1,11 @@
 package squad
 
-import "sync"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+)
 
 const (
 	StatusWaiting      = "waiting"
@@ -62,10 +67,35 @@ func (m *Mesa) AddTokens(n int64) {
 	m.Tokens += n
 }
 
-func (m *Mesa) SpentTokens() int64 {
+func (m *Mesa) StatusLine() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.Tokens
+	var b strings.Builder
+	b.WriteString("[mesa: ")
+	b.WriteString(strconv.Itoa(m.Convocations))
+	if m.MaxConvocations > 0 {
+		b.WriteString("/")
+		b.WriteString(strconv.Itoa(m.MaxConvocations))
+	}
+	b.WriteString(" convocations · ")
+	b.WriteString(formatTokensK(m.Tokens))
+	if m.TokenBudget > 0 {
+		b.WriteString("/")
+		b.WriteString(formatTokensK(m.TokenBudget))
+	}
+	b.WriteString(" tokens")
+	if m.TokenBudget > 0 && m.Tokens > m.TokenBudget {
+		b.WriteString(" · over budget")
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+func formatTokensK(n int64) string {
+	if n < 1000 {
+		return strconv.FormatInt(n, 10)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 func (m *Mesa) AddConvocation() {

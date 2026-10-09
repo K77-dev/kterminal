@@ -619,6 +619,37 @@ func TestBackoffDuration(t *testing.T) {
 			}
 		}
 	})
+	t.Run("429 without retry-after floors at 15s", func(t *testing.T) {
+		err := &statusError{code: http.StatusTooManyRequests}
+		for i := 0; i < 100; i++ {
+			if got := client.backoffDuration(1, err); got < 12*time.Second || got > 18*time.Second {
+				t.Fatalf("backoffDuration(1, 429) = %s, want within [12s, 18s] (TPM windows are per-minute)", got)
+			}
+			if got := client.backoffDuration(2, err); got < 24*time.Second || got > backoffCap {
+				t.Fatalf("backoffDuration(2, 429) = %s, want within [24s, %s]", got, backoffCap)
+			}
+		}
+	})
+	t.Run("429 floor is configurable", func(t *testing.T) {
+		floored := New("https://host", "key", false)
+		floored.retryBase = 10 * time.Millisecond
+		floored.SetRateLimitFloor(50 * time.Millisecond)
+		err := &statusError{code: http.StatusTooManyRequests}
+		for i := 0; i < 100; i++ {
+			if got := floored.backoffDuration(1, err); got < 40*time.Millisecond || got > 60*time.Millisecond {
+				t.Fatalf("backoffDuration(1, 429, floor=50ms) = %s, want within [40ms, 60ms]", got)
+			}
+		}
+	})
+	t.Run("non-429 transient keeps short backoff", func(t *testing.T) {
+		err := &statusError{code: http.StatusInternalServerError}
+		for i := 0; i < 100; i++ {
+			got := client.backoffDuration(1, err)
+			if got < 800*time.Millisecond || got > 1200*time.Millisecond {
+				t.Fatalf("backoffDuration(1, 500) = %s, want within [800ms, 1.2s] (floor is 429-only)", got)
+			}
+		}
+	})
 }
 
 func TestChatStreamRetryTransientThenSuccess(t *testing.T) {

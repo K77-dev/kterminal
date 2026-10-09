@@ -4409,8 +4409,11 @@ func TestConvokePersonaExceedsConvocationLimit(t *testing.T) {
 	}
 }
 
-func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
-	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+func TestConvokePersonaNotBlockedByTokenBudget(t *testing.T) {
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{contentChunks("architect contribution", 10, 2)}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
 	ag.AttachSquad(squad.Load())
 	k := squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 8, TokenBudget: 1000}
 	ag.RegisterKickoff(k)
@@ -4422,12 +4425,19 @@ func TestConvokePersonaExceedsTokenBudget(t *testing.T) {
 		Entries:         []squad.MesaEntry{{Name: "architect", Status: squad.StatusDone}},
 	})
 
-	_, err := ag.convokePersona(context.Background(), "architect", "review", "")
-	if err == nil {
-		t.Fatal("expected error when the token budget is exhausted")
+	text, err := ag.convokePersona(context.Background(), "architect", "review", "")
+	if err != nil {
+		t.Fatalf("convocation must proceed past the budget (the budget is advisory, not a block): %v", err)
 	}
-	if !strings.Contains(err.Error(), "token budget") {
-		t.Fatalf("error = %q, want a token budget signal", err.Error())
+	if !strings.Contains(text, "architect contribution") {
+		t.Fatalf("convocation text = %q, want the persona contribution", text)
+	}
+	if !strings.Contains(text, "[mesa: 1/8 convocations · 1.0k/1.0k tokens · over budget]") {
+		t.Fatalf("convocation text = %q, want the mesa status line flagging the overage", text)
+	}
+	m := ag.Mesa()
+	if m.Convocations != 1 || m.Tokens != 1012 {
+		t.Fatalf("mesa counters = %d/%d, want 1/1012 recorded after the convocation", m.Convocations, m.Tokens)
 	}
 }
 
@@ -4459,6 +4469,9 @@ func TestConvokePersonaNotBlockedByMaestroOverhead(t *testing.T) {
 	}
 	if m.Tokens != 12 {
 		t.Fatalf("mesa tokens = %d, want 12 (only the persona convocation usage)", m.Tokens)
+	}
+	if !strings.Contains(text, "[mesa: 1/8 convocations · 12/1.0k tokens]") {
+		t.Fatalf("convocation text = %q, want the mesa status line reporting consumption", text)
 	}
 }
 
@@ -4627,6 +4640,7 @@ func TestChatStreamRateLimitFallsBackToNextModel(t *testing.T) {
 	t.Cleanup(jevSrv.Close)
 
 	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.LLM.SetRateLimitFloor(time.Millisecond)
 	ag.Run("hello")
 	events := collectParentTurnEvents(t, ag)
 

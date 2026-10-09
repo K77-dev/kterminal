@@ -621,9 +621,6 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 	if a.turnConvocations >= k.MaxConvocations {
 		return "", fmt.Errorf("mesa reached its convocation limit (%d): converge and hand off to execution", k.MaxConvocations)
 	}
-	if m := a.currentMesa(); m != nil && m.SpentTokens() >= k.TokenBudget {
-		return "", fmt.Errorf("mesa reached its token budget (%d): converge and hand off to execution", k.TokenBudget)
-	}
 	persona, err := a.squadStore.Resolve(name)
 	if err != nil {
 		return "", err
@@ -639,6 +636,9 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 	text, err := a.RunSyncPersona(ctx, persona, description, guidance, pin, reg)
 	if m != nil {
 		m.FinishDeliberation(name)
+	}
+	if err == nil && m != nil {
+		text += "\n\n" + m.StatusLine()
 	}
 	return text, err
 }

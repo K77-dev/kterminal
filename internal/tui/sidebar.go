@@ -49,7 +49,7 @@ func (m Model) sidebarView(width int) string {
 		}
 		writeSidebarLine(&b, sidebarDivider(contentWidth), contentWidth)
 		writeSidebarLine(&b, helpStyle.Render(truncate(sidebarBudgetConvocations(mesa), contentWidth)), contentWidth)
-		writeSidebarLine(&b, helpStyle.Render(truncate(sidebarBudgetTokens(mesa), contentWidth)), contentWidth)
+		writeSidebarLine(&b, sidebarBudgetTokensStyle(mesa).Render(truncate(sidebarBudgetTokens(mesa), contentWidth)), contentWidth)
 	}
 	return sidebarPanelStyle.Height(m.height).Render(strings.TrimRight(b.String(), "\n"))
 }
@@ -126,6 +126,13 @@ func sidebarBudgetTokens(mesa *squad.Mesa) string {
 		return fmt.Sprintf("%s/%s tokens", formatTokensK(mesa.Tokens), formatTokensK(mesa.TokenBudget))
 	}
 	return fmt.Sprintf("%s tokens", formatTokensK(mesa.Tokens))
+}
+
+func sidebarBudgetTokensStyle(mesa *squad.Mesa) lipgloss.Style {
+	if mesa.TokenBudget > 0 && mesa.Tokens > mesa.TokenBudget {
+		return warningStyle
+	}
+	return helpStyle
 }
 
 func sidebarDivider(width int) string {

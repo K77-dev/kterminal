@@ -171,11 +171,12 @@ var defaultLimits = Limits{
 }
 
 type Client struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
-	limits     Limits
-	retryBase  time.Duration
+	BaseURL        string
+	APIKey         string
+	HTTPClient     *http.Client
+	limits         Limits
+	retryBase      time.Duration
+	rateLimitFloor time.Duration
 }
 
 func normalizeBaseURL(u string) string {
@@ -198,14 +199,19 @@ func New(baseURL, apiKey string, skipTLSVerify bool) *Client {
 			Timeout:   defaultLimits.RequestTimeout,
 			Transport: transport,
 		},
-		limits:    defaultLimits,
-		retryBase: time.Second,
+		limits:         defaultLimits,
+		retryBase:      time.Second,
+		rateLimitFloor: defaultRateLimitFloor,
 	}
 }
 
 func (c *Client) SetLimits(l Limits) {
 	c.limits = l
 	c.HTTPClient.Timeout = l.RequestTimeout
+}
+
+func (c *Client) SetRateLimitFloor(d time.Duration) {
+	c.rateLimitFloor = d
 }
 
 func (c *Client) do(ctx context.Context, path string, body any) (*http.Response, context.CancelFunc, error) {
@@ -407,6 +413,8 @@ func isTransient(err error) bool {
 
 const backoffCap = 30 * time.Second
 
+const defaultRateLimitFloor = 15 * time.Second
+
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return d
@@ -416,6 +424,10 @@ func jitter(d time.Duration) time.Duration {
 
 func (c *Client) backoffDuration(attempt int, err error) time.Duration {
 	raw := c.retryBase
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusTooManyRequests && se.retryAfter <= 0 && raw < c.rateLimitFloor {
+		raw = c.rateLimitFloor
+	}
 	for i := 1; i < attempt && raw < backoffCap; i++ {
 		raw *= 2
 	}
@@ -423,7 +435,6 @@ func (c *Client) backoffDuration(attempt int, err error) time.Duration {
 		raw = backoffCap
 	}
 	wait := jitter(raw)
-	var se *statusError
 	if errors.As(err, &se) && se.retryAfter > wait {
 		wait = se.retryAfter
 	}

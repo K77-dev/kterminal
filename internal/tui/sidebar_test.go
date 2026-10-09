@@ -238,6 +238,37 @@ func TestSidebarStatusAlwaysTextual(t *testing.T) {
 	}
 }
 
+func TestSidebarTokensLineWarnsOverBudget(t *testing.T) {
+	forceTrueColor(t)
+	m := newSquadModel(t, 200)
+	m.agent.RestoreMesa(&squad.Mesa{
+		MaxConvocations: 4,
+		TokenBudget:     10000,
+		Convocations:    2,
+		Tokens:          12400,
+		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDone}},
+	})
+	view := m.sidebarView(m.sidebarWidth())
+	if !strings.Contains(view, "\x1b[38;2;245;167;65m12.4k/10.0k tokens") {
+		t.Fatalf("over-budget tokens line missing the warning color:\n%q", view)
+	}
+
+	m.agent.RestoreMesa(&squad.Mesa{
+		MaxConvocations: 4,
+		TokenBudget:     20000,
+		Convocations:    2,
+		Tokens:          12400,
+		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDone}},
+	})
+	view = m.sidebarView(m.sidebarWidth())
+	if strings.Contains(view, "\x1b[38;2;245;167;65m12.4k/20.0k tokens") {
+		t.Fatalf("under-budget tokens line must keep the help styling:\n%q", view)
+	}
+	if plain := stripANSI(view); !strings.Contains(plain, "12.4k/20.0k tokens") {
+		t.Fatalf("tokens line missing as text:\n%s", plain)
+	}
+}
+
 func TestSidebarReusesDisciplineColor(t *testing.T) {
 	forceTrueColor(t)
 	m := newSquadModel(t, 200)
