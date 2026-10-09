@@ -90,6 +90,7 @@ No Claude Code, invoque com `/kspec-<nome>`:
 
 ### Git
 
+- **Fluxo padrão de entrega**: commitar na branch da feature → fast-forward merge em `develop` → `main` → push das três branches → voltar para `develop` (branch padrão para iniciar novos trabalhos e o fluxo SDD)
 - **Não execute** `git restore`, `git reset`, `git clean` ou comandos destrutivos **sem permissão explícita do usuário**
 - Binário `kterminal` e `*.test` não são versionados (`.gitignore`)
 
