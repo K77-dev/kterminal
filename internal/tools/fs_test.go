@@ -18,6 +18,66 @@ func mustArgs(t *testing.T, v map[string]any) string {
 	return string(b)
 }
 
+func TestGlobRecursiveDoublestar(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel string) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	write("root.tsx")
+	write("frontend/src/modules/a.tsx")
+	write("frontend/src/deep/nested/b.tsx")
+	write("frontend/notes.txt")
+	write("node_modules/pkg/c.tsx")
+	write(".git/hooks/d.tsx")
+	t.Chdir(dir)
+
+	reg := NewRegistry()
+	ctx := context.Background()
+
+	res, err := reg.Execute(ctx, "glob", mustArgs(t, map[string]any{"pattern": "**/*.tsx"}))
+	if err != nil {
+		t.Fatalf("glob **/*.tsx: %v", err)
+	}
+	got := strings.Split(res.Output, "\n")
+	want := []string{"frontend/src/deep/nested/b.tsx", "frontend/src/modules/a.tsx", "root.tsx"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("glob **/*.tsx = %v, want %v (recursive, skipping .git and node_modules)", got, want)
+	}
+
+	res, err = reg.Execute(ctx, "glob", mustArgs(t, map[string]any{"pattern": "frontend/src/**/*.tsx"}))
+	if err != nil {
+		t.Fatalf("glob frontend/src/**/*.tsx: %v", err)
+	}
+	got = strings.Split(res.Output, "\n")
+	want = []string{"frontend/src/deep/nested/b.tsx", "frontend/src/modules/a.tsx"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("glob frontend/src/**/*.tsx = %v, want %v", got, want)
+	}
+
+	res, err = reg.Execute(ctx, "glob", mustArgs(t, map[string]any{"pattern": "*.tsx"}))
+	if err != nil {
+		t.Fatalf("glob *.tsx: %v", err)
+	}
+	if res.Output != "root.tsx" {
+		t.Fatalf("glob *.tsx = %q, want single-level root.tsx only", res.Output)
+	}
+
+	res, err = reg.Execute(ctx, "glob", mustArgs(t, map[string]any{"pattern": "**/nested/*.tsx"}))
+	if err != nil {
+		t.Fatalf("glob **/nested/*.tsx: %v", err)
+	}
+	if res.Output != "frontend/src/deep/nested/b.tsx" {
+		t.Fatalf("glob **/nested/*.tsx = %q, want the nested file", res.Output)
+	}
+}
+
 func TestWriteToolDiffOnExistingFile(t *testing.T) {
 	reg := NewRegistry()
 	path := filepath.Join(t.TempDir(), "file.txt")

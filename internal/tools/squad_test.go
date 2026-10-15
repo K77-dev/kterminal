@@ -28,7 +28,7 @@ func hasName(reg *Registry, name string) bool {
 func TestNewReadOnlyRegistryExposesOnlyReadTools(t *testing.T) {
 	reg := NewReadOnlyRegistry()
 
-	for _, name := range []string{"read", "glob", "grep"} {
+	for _, name := range []string{"read", "glob", "grep", "graphify"} {
 		if !hasName(reg, name) {
 			t.Errorf("read-only registry missing %q, has %v", name, defNames(reg))
 		}
@@ -38,8 +38,8 @@ func TestNewReadOnlyRegistryExposesOnlyReadTools(t *testing.T) {
 			t.Errorf("read-only registry must not expose %q, has %v", name, defNames(reg))
 		}
 	}
-	if got := len(defNames(reg)); got != 3 {
-		t.Fatalf("read-only registry has %d tools, want 3: %v", got, defNames(reg))
+	if got := len(defNames(reg)); got != 4 {
+		t.Fatalf("read-only registry has %d tools, want 4: %v", got, defNames(reg))
 	}
 }
 

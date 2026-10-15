@@ -75,7 +75,7 @@ func globTool() Tool {
 			if err != nil {
 				return Result{}, err
 			}
-			matches, err := filepath.Glob(pattern)
+			matches, err := expandGlob(pattern)
 			if err != nil {
 				return Result{}, err
 			}
@@ -89,6 +89,65 @@ func globTool() Tool {
 			return Result{Output: strings.Join(matches, "\n")}, nil
 		},
 	}
+}
+
+var globSkipDirs = map[string]bool{".git": true, "node_modules": true}
+
+func expandGlob(pattern string) ([]string, error) {
+	if !strings.Contains(pattern, "**") || filepath.IsAbs(pattern) {
+		return filepath.Glob(pattern)
+	}
+	segs := strings.Split(filepath.ToSlash(pattern), "/")
+	for _, seg := range segs {
+		if seg == "**" {
+			continue
+		}
+		if _, err := filepath.Match(seg, ""); err != nil {
+			return nil, err
+		}
+	}
+	var matches []string
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != "." && globSkipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if matchGlobSegments(segs, strings.Split(filepath.ToSlash(path), "/")) {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return matches, nil
+}
+
+func matchGlobSegments(pattern, path []string) bool {
+	if len(pattern) == 0 {
+		return len(path) == 0
+	}
+	if pattern[0] == "**" {
+		for i := 0; i <= len(path); i++ {
+			if matchGlobSegments(pattern[1:], path[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(path) == 0 {
+		return false
+	}
+	ok, err := filepath.Match(pattern[0], path[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchGlobSegments(pattern[1:], path[1:])
 }
 
 func grepTool() Tool {

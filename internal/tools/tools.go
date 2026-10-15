@@ -52,6 +52,7 @@ func NewReadOnlyRegistry() *Registry {
 	r.Register(readTool())
 	r.Register(globTool())
 	r.Register(grepTool())
+	r.Register(graphifyTool())
 	return r
 }
 

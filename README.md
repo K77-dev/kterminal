@@ -155,7 +155,7 @@ O status de cada persona na sidebar conta a história: `waiting` → `deliberati
 
 Cada convocation cria um subagente **recém-nascido**, com memória zerada:
 
-- **Vê**: seu system prompt (persona + apenas as rules da sua disciplina), a `description` e o `guidance` que o maestro escolheu repassar, e ferramentas de leitura (`read`, `glob`, `grep`) para inspecionar o código.
+- **Vê**: seu system prompt (persona + apenas as rules da sua disciplina), a `description` e o `guidance` que o maestro escolheu repassar, e ferramentas de leitura (`read`, `glob`, `grep` — mais a tool `graphify` de consulta ao knowledge graph, quando `graphify-out/graph.json` existe) para inspecionar o código.
 - **Não vê**: a conversa das outras personas, o histórico completo da sessão, ferramentas de escrita (`write`/`edit`/`bash` são bloqueados na mesa) e a tool `task` (personas não convocam personas — sem recursão).
 
 É **hub-and-spoke**: o maestro é o único ponto de passagem. Isso tem três consequências práticas:
@@ -272,7 +272,7 @@ Sua mensagem entra numa **fila** e o maestro a consome entre convocações, inco
 <details open>
 <summary><strong>Personas podem escrever código?</strong></summary>
 
-**Na mesa, não.** Personas recebem apenas `read`/`glob`/`grep` — a mesa delibera sobre o código, não o altera. Quem escreve são os subagentes de execução, na fase pós-convergência, com o registry completo.
+**Na mesa, não.** Personas recebem apenas `read`/`glob`/`grep` e a tool de consulta `graphify` — a mesa delibera sobre o código, não o altera. Quem escreve são os subagentes de execução, na fase pós-convergência, com o registry completo.
 
 </details>
 
