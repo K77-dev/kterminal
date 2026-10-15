@@ -30,7 +30,15 @@ type Agent struct {
 }
 
 type Typesafe struct {
-	APIKey string `toml:"api_key"`
+	APIKey  string `toml:"api_key"`
+	Enabled *bool  `toml:"enabled"`
+}
+
+func (t Typesafe) JevEnabled() bool {
+	if t.Enabled == nil {
+		return true
+	}
+	return *t.Enabled
 }
 
 type Squad struct {
@@ -41,6 +49,7 @@ type Squad struct {
 }
 
 type Config struct {
+	Model    string   `toml:"model"`
 	LLM      LLM      `toml:"llm"`
 	Typesafe Typesafe `toml:"typesafe"`
 	Squad    Squad    `toml:"squad"`
@@ -126,6 +135,16 @@ func Load() (*Config, error) {
 	if v := os.Getenv("TYPESAFE_API_KEY"); v != "" {
 		cfg.Typesafe.APIKey = v
 	}
+	if v := os.Getenv("KTERMINAL_TYPESAFE_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid typesafe.enabled %q: %w", v, err)
+		}
+		cfg.Typesafe.Enabled = &enabled
+	}
+	if v := os.Getenv("KTERMINAL_MODEL"); v != "" {
+		cfg.Model = v
+	}
 	if cfg.Squad.DefaultMode == "" {
 		cfg.Squad.DefaultMode = defaultMode
 	}
@@ -173,6 +192,10 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) Save() error {
+	if c.Typesafe.Enabled == nil {
+		enabled := true
+		c.Typesafe.Enabled = &enabled
+	}
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err
 	}

@@ -462,3 +462,278 @@ func TestSaveOmitsResolvedDurationFields(t *testing.T) {
 		}
 	}
 }
+
+func TestJevEnabledAccessorTriState(t *testing.T) {
+	var ts Typesafe
+	if !ts.JevEnabled() {
+		t.Error("JevEnabled() = false, want true for nil Enabled")
+	}
+	explicitTrue := true
+	ts.Enabled = &explicitTrue
+	if !ts.JevEnabled() {
+		t.Error("JevEnabled() = false, want true for explicit true")
+	}
+	explicitFalse := false
+	ts.Enabled = &explicitFalse
+	if ts.JevEnabled() {
+		t.Error("JevEnabled() = true, want false for explicit false")
+	}
+}
+
+func TestJevEnabledNilDefaultsTrue(t *testing.T) {
+	writeTestConfig(t, "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Typesafe.Enabled != nil {
+		t.Errorf("Enabled = %v, want nil", *cfg.Typesafe.Enabled)
+	}
+	if !cfg.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = false, want true for config without enabled")
+	}
+}
+
+func TestJevEnabledExplicitTOML(t *testing.T) {
+	writeTestConfig(t, `
+[typesafe]
+api_key = "ts-key"
+enabled = true
+`)
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Typesafe.Enabled == nil {
+		t.Fatal("Enabled = nil, want explicit true")
+	}
+	if !*cfg.Typesafe.Enabled {
+		t.Error("*Enabled = false, want true")
+	}
+	if !cfg.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = false, want true for enabled = true")
+	}
+
+	writeTestConfig(t, `
+[typesafe]
+api_key = "ts-key"
+enabled = false
+`)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Typesafe.Enabled == nil {
+		t.Fatal("Enabled = nil, want explicit false")
+	}
+	if *cfg.Typesafe.Enabled {
+		t.Error("*Enabled = true, want false")
+	}
+	if cfg.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = true, want false for enabled = false")
+	}
+}
+
+func TestLoadTypesafeEnabledEnvOverridesFile(t *testing.T) {
+	cases := []struct {
+		name        string
+		fileValue   string
+		envValue    string
+		wantEnabled bool
+	}{
+		{"env false over file true", "true", "false", false},
+		{"env true over file false", "false", "true", true},
+		{"env 1 over file false", "false", "1", true},
+		{"env 0 over file true", "true", "0", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTestConfig(t, "[typesafe]\nenabled = "+tc.fileValue+"\n")
+			t.Setenv("KTERMINAL_TYPESAFE_ENABLED", tc.envValue)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Typesafe.Enabled == nil {
+				t.Fatal("Enabled = nil, want explicit value from env")
+			}
+			if *cfg.Typesafe.Enabled != tc.wantEnabled {
+				t.Errorf("*Enabled = %v, want %v", *cfg.Typesafe.Enabled, tc.wantEnabled)
+			}
+			if cfg.Typesafe.JevEnabled() != tc.wantEnabled {
+				t.Errorf("JevEnabled() = %v, want %v", cfg.Typesafe.JevEnabled(), tc.wantEnabled)
+			}
+		})
+	}
+}
+
+func TestLoadTypesafeEnabledEnvInvalidRejected(t *testing.T) {
+	writeTestConfig(t, "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "maybe")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid KTERMINAL_TYPESAFE_ENABLED, got nil")
+	}
+	if !strings.Contains(err.Error(), "typesafe.enabled") {
+		t.Errorf("error %q missing key typesafe.enabled", err)
+	}
+	if !strings.Contains(err.Error(), "maybe") {
+		t.Errorf("error %q missing value maybe", err)
+	}
+}
+
+func TestLoadModelEnvOverridesFile(t *testing.T) {
+	writeTestConfig(t, "model = \"from-file\"\n")
+	t.Setenv("KTERMINAL_MODEL", "from-env")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "from-env" {
+		t.Errorf("Model = %q, want \"from-env\"", cfg.Model)
+	}
+
+	writeTestConfig(t, "model = \"from-file\"\n")
+	t.Setenv("KTERMINAL_MODEL", "")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "from-file" {
+		t.Errorf("Model = %q, want \"from-file\" with empty env", cfg.Model)
+	}
+}
+
+func TestSaveNormalizesNilEnabledToExplicitTrue(t *testing.T) {
+	writeTestConfig(t, `
+[typesafe]
+api_key = "ts-key"
+`)
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Typesafe.Enabled != nil {
+		t.Fatal("Enabled != nil before Save, want nil")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "enabled = true") {
+		t.Errorf("saved config missing materialized enabled = true:\n%s", content)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Typesafe.Enabled == nil {
+		t.Fatal("Enabled = nil after round-trip, want explicit true")
+	}
+	if !*loaded.Typesafe.Enabled {
+		t.Error("*Enabled = false after round-trip, want true")
+	}
+	if !loaded.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = false after round-trip, want true")
+	}
+}
+
+func TestSaveRoundTripPreservesExplicitFalse(t *testing.T) {
+	writeTestConfig(t, `
+[typesafe]
+api_key = "ts-key"
+enabled = false
+`)
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Typesafe.JevEnabled() {
+		t.Fatal("JevEnabled() = true before Save, want false")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "enabled = false") {
+		t.Errorf("saved config missing enabled = false:\n%s", string(data))
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = true after round-trip, want false")
+	}
+}
+
+func TestSaveRoundTripModel(t *testing.T) {
+	writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model = "glm-5.3"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "model = \"glm-5.3\"") {
+		t.Errorf("saved config missing model entry:\n%s", string(data))
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Model != "glm-5.3" {
+		t.Errorf("Model = %q after round-trip, want \"glm-5.3\"", loaded.Model)
+	}
+}
+
+func TestLoadLegacyConfigDefaults(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+base_url = "http://localhost"
+api_key = "key"
+
+[typesafe]
+api_key = "ts-key"
+
+[squad]
+default_mode = "sdd"
+max_convocations = 8
+token_budget = 200000
+`)
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	t.Setenv("KTERMINAL_MODEL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "" {
+		t.Errorf("Model = %q, want \"\" for legacy config", cfg.Model)
+	}
+	if cfg.Typesafe.Enabled != nil {
+		t.Errorf("Enabled = %v, want nil for legacy config", *cfg.Typesafe.Enabled)
+	}
+	if !cfg.Typesafe.JevEnabled() {
+		t.Error("JevEnabled() = false, want true for legacy config")
+	}
+	if cfg.Typesafe.APIKey != "ts-key" {
+		t.Errorf("Typesafe.APIKey = %q, want \"ts-key\"", cfg.Typesafe.APIKey)
+	}
+}

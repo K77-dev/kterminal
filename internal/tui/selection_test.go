@@ -10,7 +10,7 @@ import (
 )
 
 func TestStripANSI(t *testing.T) {
-	in := "\x1b[38;2;250;178;131mhello\x1b[0m world"
+	in := "\x1b[38;2;240;168;63mhello\x1b[0m world"
 	want := "hello world"
 	if got := stripANSI(in); got != want {
 		t.Fatalf("stripANSI = %q, want %q", got, want)
@@ -76,19 +76,19 @@ func TestMouseSelectionFlow(t *testing.T) {
 		m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventRoute, Model: "glm-5.2", Router: "jev", Confidence: 0.9}})
 	}
 
-	press := tea.MouseMsg(tea.MouseEvent{X: 0, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	press := tea.MouseMsg(tea.MouseEvent{X: 0, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = step(t, m, press)
 	if !m.selActive {
 		t.Fatal("press should start selection")
 	}
 
-	drag := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	drag := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
 	m = step(t, m, drag)
 	if !strings.Contains(m.vp.View(), "\x1b[7m") {
 		t.Fatal("drag should highlight content")
 	}
 
-	release := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	release := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
 	m = step(t, m, release)
 	if copied == "" {
 		t.Fatal("release should copy selection")

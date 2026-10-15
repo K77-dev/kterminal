@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,6 +169,28 @@ func capturingJev(t *testing.T, choice string, confidence float64, captured *map
 					"choice":        choice,
 					"confidence":    confidence,
 					"probabilities": map[string]float64{choice: confidence},
+				},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func countingJev(t *testing.T, hits *atomic.Int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/systemone", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		json.NewEncoder(w).Encode(map[string]any{
+			"model": "jev-test",
+			"answers": map[string]any{
+				"model_choice": map[string]any{
+					"type":          "choice",
+					"choice":        "glm-5.3",
+					"confidence":    0.9,
+					"probabilities": map[string]float64{"glm-5.3": 0.9},
 				},
 			},
 		})
@@ -573,6 +596,112 @@ func TestAgentPinnedSkipsRouter(t *testing.T) {
 		if e.Kind == EventRoute && (e.Model != "glm-5.1" || e.Router != "pin") {
 			t.Fatalf("route = %+v, want pinned glm-5.1", e)
 		}
+	}
+}
+
+func TestJevDisabledFullSessionZeroRequestsFixedRoutes(t *testing.T) {
+	cat := testCatalog(t)
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_1", "bash", `{"command":"echo hi"}`),
+		contentChunks("parent done after the tool", 20, 1),
+		contentChunks("architect contribution", 10, 2),
+	}, &calls)
+	var jevHits atomic.Int32
+	jevSrv := countingJev(t, &jevHits)
+	sess := newSessionWriter(t)
+
+	jevClient := jev.New("test-key")
+	jevClient.BaseURL = jevSrv.URL
+	ag := New(
+		llm.New(gw.URL, "gw-key", false),
+		router.NewJev(jevClient),
+		&router.HeuristicRouter{Default: cat.DefaultModel},
+		cat,
+		tools.NewRegistry(),
+		sess,
+		false,
+	)
+	primary, fallback := router.Wire("test-key", false, "glm-5.3", cat)
+	ag.SetRouters(primary, fallback)
+	ag.SetPinned("glm-5.3")
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter with Jev disabled", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with Jev disabled", ag.Fallback)
+	}
+
+	ag.Run("run echo hi")
+	parentEvents := collectParentTurnEvents(t, ag)
+	parentRoutes := 0
+	for _, e := range parentEvents {
+		if e.Kind != EventRoute {
+			continue
+		}
+		parentRoutes++
+		if e.Model != "glm-5.3" || e.Router != "pin" {
+			t.Fatalf("parent route = %+v, want pinned glm-5.3 on every tool-loop step", e)
+		}
+	}
+	if parentRoutes != 2 {
+		t.Fatalf("parent routes = %d, want 2 (one per LLM call in the tool loop)", parentRoutes)
+	}
+
+	persona, err := squad.Load().Resolve("architect")
+	if err != nil {
+		t.Fatalf("resolve architect: %v", err)
+	}
+	subText, err := ag.RunSyncPersona(context.Background(), persona, "review the design", "", "", tools.NewRegistry())
+	if err != nil {
+		t.Fatalf("RunSyncPersona: %v", err)
+	}
+	if !strings.Contains(subText, "architect contribution") {
+		t.Fatalf("subagent text = %q, want the persona contribution", subText)
+	}
+	subRoute := waitForDepthEvent(t, ag.Events, EventRoute, 1)
+	if subRoute.Model != "glm-5.3" || subRoute.Router != "fixed" {
+		t.Fatalf("subagent route = %+v, want glm-5.3 via fixed", subRoute)
+	}
+	if subRoute.Agent != "architect" {
+		t.Fatalf("subagent route agent = %q, want architect", subRoute.Agent)
+	}
+
+	if got := jevHits.Load(); got != 0 {
+		t.Fatalf("jev requests = %d, want 0 across the whole session including the subagent", got)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("gateway calls = %d, want 3 (parent tool step, parent final, subagent)", len(calls))
+	}
+	for i, c := range calls {
+		if c.Model != "glm-5.3" {
+			t.Fatalf("gateway call %d model = %q, want the fixed glm-5.3", i, c.Model)
+		}
+	}
+
+	routes, pinRoutes, fixedRoutes := 0, 0, 0
+	for _, ev := range transcriptLines(t, sess) {
+		if ev["type"] != "route" {
+			continue
+		}
+		routes++
+		if ev["model"] != "glm-5.3" {
+			t.Fatalf("transcript route model = %v, want glm-5.3 in 100%% of the entries", ev["model"])
+		}
+		switch ev["router"] {
+		case "pin":
+			pinRoutes++
+		case "fixed":
+			fixedRoutes++
+		default:
+			t.Fatalf("transcript route router = %v, want pin or fixed — no keyword decisions with Jev disabled", ev["router"])
+		}
+	}
+	if routes != 3 {
+		t.Fatalf("transcript routes = %d, want 3 (parent x2 + subagent)", routes)
+	}
+	if pinRoutes != 2 || fixedRoutes != 1 {
+		t.Fatalf("transcript router distribution = pin:%d fixed:%d, want pin:2 fixed:1", pinRoutes, fixedRoutes)
 	}
 }
 

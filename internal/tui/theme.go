@@ -1,30 +1,25 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
 )
 
 var (
-	colPrimary      = lipgloss.Color("#fab283")
-	colSecondary    = lipgloss.Color("#5c9cf5")
-	colAccent       = lipgloss.Color("#9d7cd8")
-	colError        = lipgloss.Color("#e06c75")
-	colWarning      = lipgloss.Color("#f5a742")
-	colSuccess      = lipgloss.Color("#7fd88f")
-	colInfo         = lipgloss.Color("#56b6c2")
-	colYellow       = lipgloss.Color("#e5c07b")
-	colText         = lipgloss.Color("#eeeeee")
-	colTextMuted    = lipgloss.Color("#808080")
-	colDiffAdded    = lipgloss.Color("#4fd6be")
-	colDiffRemoved  = lipgloss.Color("#c53b53")
-	colBg           = lipgloss.Color("#0a0a0a")
-	colBgPanel      = lipgloss.Color("#141414")
-	colBgElement    = lipgloss.Color("#1e1e1e")
-	colBorder       = lipgloss.Color("#484848")
-	colBorderActive = lipgloss.Color("#606060")
-	colShadow       = lipgloss.Color("#3c3c3c")
+	colInk     = lipgloss.Color("#0d0c0a")
+	colBone    = lipgloss.Color("#eae4d8")
+	colClay    = lipgloss.Color("#8e8878")
+	colAmber   = lipgloss.Color("#f0a83f")
+	colJade    = lipgloss.Color("#8ec7ac")
+	colRed     = lipgloss.Color("#e2655f")
+	colCaution = lipgloss.Color("#e08a4a")
+	colGold    = lipgloss.Color("#c9a268")
+	colSeam    = lipgloss.Color("#3b372e")
+	colSeamHi  = lipgloss.Color("#57503f")
+
+	colSlate  = lipgloss.Color("#8fa8c9")
+	colCyan   = lipgloss.Color("#7fbfc4")
+	colViolet = lipgloss.Color("#a893c9")
+	colRose   = lipgloss.Color("#d98a8a")
 )
 
 var leftBorder = lipgloss.Border{
@@ -34,182 +29,150 @@ var leftBorder = lipgloss.Border{
 var (
 	userBoxStyle = lipgloss.NewStyle().
 			Border(leftBorder, false, false, false, true).
-			BorderForeground(colPrimary).
-			Background(colBgPanel).
+			BorderForeground(colAmber).
 			Padding(1, 1, 1, 2)
 
 	errorBoxStyle = lipgloss.NewStyle().
 			Border(leftBorder, false, false, false, true).
-			BorderForeground(colError).
-			Background(colBgPanel).
+			BorderForeground(colRed).
 			Padding(1, 1, 1, 2)
 
 	confirmBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colWarning).
-			Background(colBgPanel).
+			BorderForeground(colCaution).
 			Padding(1, 2)
 
-	promptBoxStyle = lipgloss.NewStyle().
-			Border(leftBorder, false, false, false, true).
-			BorderForeground(colBorderActive).
+	askBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colAmber).
 			Padding(1, 2)
+
+	promptDeckStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colSeam).
+			Padding(0, 1)
+
+	promptDeckBusyStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colAmber).
+				Padding(0, 1)
+
+	promptChevronStyle = lipgloss.NewStyle().
+				Foreground(colAmber)
 
 	routeStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colJade)
 
 	compactionStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colJade)
 
 	toolStyle = lipgloss.NewStyle().
-			Foreground(colInfo)
+			Foreground(colJade)
 
 	resultStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colClay)
 
 	nestedStyle = lipgloss.NewStyle().
-			Foreground(colSecondary)
+			Foreground(colJade)
 
 	diffAddedStyle = lipgloss.NewStyle().
-			Foreground(colDiffAdded)
+			Foreground(colJade)
 
 	diffRemovedStyle = lipgloss.NewStyle().
-				Foreground(colDiffRemoved)
+				Foreground(colRed)
 
 	diffContextStyle = lipgloss.NewStyle().
-				Foreground(colTextMuted)
+				Foreground(colClay)
 
 	metaMarkStyle = lipgloss.NewStyle().
-			Foreground(colAccent)
+			Foreground(colJade)
+
+	abortMarkStyle = lipgloss.NewStyle().
+			Foreground(colCaution)
 
 	metaStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colClay)
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colClay)
 
 	titleStyle = lipgloss.NewStyle().
-			Foreground(colAccent).
+			Foreground(colBone).
 			Bold(true)
 
 	labelStyle = lipgloss.NewStyle().
-			Foreground(colTextMuted)
+			Foreground(colClay)
 
-	fadeCornerStyle = lipgloss.NewStyle().
-			Foreground(colBorderActive)
+	chromeLabelStyle = lipgloss.NewStyle().
+				Foreground(colClay).
+				Bold(true)
 
 	primaryStyle = lipgloss.NewStyle().
-			Foreground(colPrimary)
+			Foreground(colAmber)
 
 	textStyle = lipgloss.NewStyle().
-			Foreground(colText)
+			Foreground(colBone)
 
 	warningStyle = lipgloss.NewStyle().
-			Foreground(colWarning)
+			Foreground(colCaution)
 
 	successStyle = lipgloss.NewStyle().
-			Foreground(colSuccess)
+			Foreground(colJade)
 
 	configBoxStyle = lipgloss.NewStyle().
-			Border(leftBorder, false, false, false, true).
-			BorderForeground(colBorderActive).
-			Background(colBgElement).
-			Padding(0, 2)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colSeam).
+			Padding(0, 1)
 
 	configFocusStyle = lipgloss.NewStyle().
-				Border(leftBorder, false, false, false, true).
-				BorderForeground(colPrimary).
-				Background(colBgElement).
-				Padding(0, 2)
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colAmber).
+				Padding(0, 1)
 
 	mentionPopupStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colBorder).
-				Background(colBgPanel).
+				BorderForeground(colSeam).
 				Padding(0, 1)
 
 	mentionItemStyle = lipgloss.NewStyle().
-				Foreground(colTextMuted)
+				Foreground(colClay)
 
 	mentionSelectedStyle = lipgloss.NewStyle().
-				Foreground(colPrimary)
+				Foreground(colAmber)
 
 	chipStyle = lipgloss.NewStyle().
-			Foreground(colSecondary)
+			Foreground(colAmber)
 
 	sidebarPanelStyle = lipgloss.NewStyle().
 				Border(leftBorder, false, false, false, true).
-				BorderForeground(colBorder).
-				Background(colBgPanel).
+				BorderForeground(colSeam).
 				Padding(0, 1)
 
 	sidebarDividerStyle = lipgloss.NewStyle().
-				Foreground(colBorder)
+				Foreground(colSeam)
 )
 
 var disciplineColors = map[string]lipgloss.Color{
-	"architecture": colAccent,
-	"backend":      colSecondary,
-	"database":     colInfo,
-	"frontend":     colPrimary,
-	"qa":           colSuccess,
-	"test":         colYellow,
-	"ux":           colWarning,
+	"architecture": colGold,
+	"backend":      colSlate,
+	"database":     colCyan,
+	"frontend":     colAmber,
+	"qa":           colJade,
+	"test":         colViolet,
+	"ux":           colRose,
 }
 
 func disciplineColor(discipline string) lipgloss.Color {
 	if c, ok := disciplineColors[discipline]; ok {
 		return c
 	}
-	return colTextMuted
+	return colClay
 }
 
 func agentLabelStyle(discipline string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(disciplineColor(discipline))
 }
 
-var logoLeft = []string{
-	"                        ",
-	"█_▀█ ████ █▀▀█ █▀▀█ █▄▄█",
-	"███_ _█__ █^^^ █▀▀▄ ████",
-	"█_▄█ _█__ ▀▀▀▀ █_▄█ █__█",
-}
-
-var logoRight = []string{
-	"                   ",
-	"_██_ █▀▀▄ ▄██▄ █___",
-	"_██_ █__█ █▄▄█ █___",
-	"_██_ ▀~~▀ █__█ ████",
-}
-
-func renderLogoLine(line string, fg lipgloss.Color, bold bool) string {
-	var b strings.Builder
-	for _, ch := range line {
-		switch ch {
-		case '_':
-			b.WriteString(lipgloss.NewStyle().Background(colShadow).Render(" "))
-		case '^', '~':
-			b.WriteString(lipgloss.NewStyle().Foreground(colShadow).Render("▀"))
-		case ',':
-			b.WriteString(lipgloss.NewStyle().Foreground(colShadow).Render("▄"))
-		case ' ':
-			b.WriteString(" ")
-		default:
-			b.WriteString(lipgloss.NewStyle().Foreground(fg).Bold(bold).Render(string(ch)))
-		}
-	}
-	return b.String()
-}
-
 func renderLogo() string {
-	var b strings.Builder
-	for i, left := range logoLeft {
-		b.WriteString(renderLogoLine(left, colTextMuted, false))
-		b.WriteString(" ")
-		b.WriteString(renderLogoLine(logoRight[i], colText, true))
-		if i < len(logoLeft)-1 {
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
+	return primaryStyle.Render("◆") + " " + titleStyle.Render("K T E R M I N A L")
 }

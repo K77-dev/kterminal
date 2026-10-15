@@ -29,7 +29,7 @@ func newAskWizard(questions []agent.AskQuestion, width int) *askWizard {
 	input.Placeholder = "type your answer"
 	input.CharLimit = 0
 	input.Cursor.SetMode(cursor.CursorStatic)
-	input.Cursor.Style = lipgloss.NewStyle().Background(colBgElement).Foreground(colText)
+	input.Cursor.Style = lipgloss.NewStyle().Background(colAmber).Foreground(colInk)
 	if width > 0 {
 		input.Width = maxInt(width-14, 20)
 	}
@@ -190,7 +190,7 @@ func (m Model) askView() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render(askHints(q)))
-	return confirmBoxStyle.Render(b.String())
+	return askBoxStyle.Render(b.String())
 }
 
 func askHeader(w *askWizard) string {

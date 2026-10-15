@@ -19,7 +19,7 @@ const (
 	sidebarSeparator        = " · "
 	sidebarIdleEntry        = "—"
 	sidebarMesaIdleText     = "mesa not started"
-	sidebarHeaderTitle      = "squad"
+	sidebarHeaderTitle      = "SQUAD"
 	sidebarMaestroName      = "maestro"
 )
 
@@ -37,7 +37,7 @@ func (m Model) sidebarView(width int) string {
 	}
 	contentWidth := width - sidebarChromeWidth
 	var b strings.Builder
-	writeSidebarLine(&b, titleStyle.Render(sidebarHeaderTitle), contentWidth)
+	writeSidebarLine(&b, chromeLabelStyle.Render(sidebarHeaderTitle), contentWidth)
 	m.writeSidebarMaestro(&b, contentWidth)
 	writeSidebarLine(&b, sidebarDivider(contentWidth), contentWidth)
 	mesa := m.agent.Mesa()

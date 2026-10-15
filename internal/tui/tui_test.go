@@ -125,13 +125,13 @@ func TestRouteLineShowsReason(t *testing.T) {
 
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventRoute, Model: "glm-5.2", Router: "jev", Confidence: 0.43, Reason: "low confidence, using default"}})
 	plain := stripANSI(m.vp.View())
-	if !strings.Contains(plain, "⚡ glm-5.2 · jev 0.43 · low confidence, using default") {
+	if !strings.Contains(plain, "◈ glm-5.2 · jev 0.43 · low confidence, using default") {
 		t.Fatalf("route line missing reason:\n%s", plain)
 	}
 
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventRoute, Model: "deepseek-v4-flash", Router: "jev", Confidence: 0.66}})
 	plain = stripANSI(m.vp.View())
-	if !strings.Contains(plain, "⚡ deepseek-v4-flash · jev 0.66") {
+	if !strings.Contains(plain, "◈ deepseek-v4-flash · jev 0.66") {
 		t.Fatalf("route line missing direct choice:\n%s", plain)
 	}
 	if strings.Contains(plain, "deepseek-v4-flash · jev 0.66 ·") {
@@ -151,11 +151,11 @@ func TestLiveBlockAccumulatesAndReplaces(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolOutput, Tool: "bash", Text: "line 3"}})
 
 	content := m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;128;128;128mline 1") {
+	if !strings.Contains(content, "\x1b[38;2;142;136;120mline 1") {
 		t.Fatalf("live block missing colTextMuted ANSI:\n%q", content)
 	}
 	plain := stripANSI(content)
-	toolIdx := strings.Index(plain, `● bash({"command":"stream"})`)
+	toolIdx := strings.Index(plain, `▶ bash({"command":"stream"})`)
 	liveIdx := strings.Index(plain, "   line 1")
 	if toolIdx < 0 || liveIdx < 0 {
 		t.Fatalf("content missing tool line or live block:\n%s", plain)
@@ -182,7 +182,7 @@ func TestLiveBlockAccumulatesAndReplaces(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolOutput, Tool: "bash", Text: strings.Join(burst, "\n")}})
 
 	content = m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;128;128;128m… +8 lines") {
+	if !strings.Contains(content, "\x1b[38;2;142;136;120m… +8 lines") {
 		t.Fatalf("omitted counter missing colTextMuted ANSI:\n%q", content)
 	}
 	plain = stripANSI(content)
@@ -217,7 +217,7 @@ func TestLiveBlockAccumulatesAndReplaces(t *testing.T) {
 		t.Fatalf("live block not discarded on tool result: lines=%v omitted=%d", m.liveLines, m.liveOmitted)
 	}
 	plain = stripANSI(m.vp.View())
-	if !strings.Contains(plain, "  consolidated ⏎ result") {
+	if !strings.Contains(plain, "↳ consolidated ⏎ result") {
 		t.Fatalf("content missing consolidated result:\n%s", plain)
 	}
 	for _, gone := range []string{"out 05", "out 19", "… +8 lines"} {
@@ -253,14 +253,14 @@ func TestSilentCommandNoLiveBlock(t *testing.T) {
 	if hint := m.hintBar(); hint != hintBefore {
 		t.Fatalf("spinner hint changed:\nbefore: %q\nafter: %q", hintBefore, hint)
 	}
-	if !strings.Contains(m.View(), "Thinking") {
+	if !strings.Contains(m.View(), "thinking") {
 		t.Fatalf("spinner missing from view:\n%s", m.View())
 	}
 	plain := stripANSI(m.vp.View())
-	if !strings.Contains(plain, `● bash({"command":"sleep 30"})`) {
+	if !strings.Contains(plain, `▶ bash({"command":"sleep 30"})`) {
 		t.Fatalf("content missing tool line:\n%s", plain)
 	}
-	if !strings.Contains(plain, "  done") {
+	if !strings.Contains(plain, "↳ done") {
 		t.Fatalf("content missing tool result:\n%s", plain)
 	}
 }
@@ -281,7 +281,7 @@ func TestLiveBlockEmptyLineRenders(t *testing.T) {
 		t.Fatalf("liveOmitted = %d, want 0", m.liveOmitted)
 	}
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, `● bash({"command":"echo"})`) {
+	if !strings.Contains(plain, `▶ bash({"command":"echo"})`) {
 		t.Fatalf("content missing tool line:\n%s", plain)
 	}
 }
@@ -479,7 +479,7 @@ func TestChatMarginsMatchOpencodePattern(t *testing.T) {
 	}
 
 	m.blocks = append(m.blocks, userBlock("pergunta do usuário", nil))
-	m.blocks = append(m.blocks, indentLines(toolStyle.Render("● bash(ls)"), statusIndent))
+	m.blocks = append(m.blocks, indentLines(toolStyle.Render("▶ bash(ls)"), statusIndent))
 	m.blocks = append(m.blocks, renderMarkdown("resposta do assistente", m.mdWidth, m.dark))
 	m.refreshContent()
 
@@ -491,16 +491,15 @@ func TestChatMarginsMatchOpencodePattern(t *testing.T) {
 		if !strings.HasPrefix(line, strings.Repeat(" ", chatInset)) {
 			t.Fatalf("line %d must start with the chat inset:\n%s", i, line)
 		}
-		if got := uniseg.StringWidth(line); got > 60-chatInset {
-			t.Fatalf("line %d width = %d, exceeds the right margin:\n%s", i, got, line)
+		if got := uniseg.StringWidth(line); got > 60 {
+			t.Fatalf("line %d width = %d, exceeds the terminal width:\n%s", i, got, line)
 		}
 	}
 
 	for _, want := range []string{
 		"  ┃  pergunta do usuário",
-		"     ● bash(ls)",
+		"     ▶ bash(ls)",
 		"     resposta do assistente",
-		"  ╹",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing aligned %q:\n%s", want, view)
@@ -950,6 +949,44 @@ func TestHintBarShowsEscToInterruptWhenBusy(t *testing.T) {
 	}
 }
 
+func TestHintBarShowsRoutingState(t *testing.T) {
+	m := newTestModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.cwd = "/stable/cwd"
+
+	m.cfg.Typesafe.APIKey = "jev-key"
+	hint := stripANSI(m.hintBar())
+	if !strings.Contains(hint, "jev") || strings.Contains(hint, "jev off") {
+		t.Fatalf("hint bar must show jev when enabled with an api key:\n%s", hint)
+	}
+
+	m.agent.SetPinned("glm-5.3")
+	hint = stripANSI(m.hintBar())
+	if !strings.Contains(hint, "pinned glm-5.3") {
+		t.Fatalf("hint bar missing the pinned indicator:\n%s", hint)
+	}
+	if !strings.Contains(hint, "jev") || strings.Contains(hint, "jev off") {
+		t.Fatalf("hint bar must keep the jev indicator alongside the pin:\n%s", hint)
+	}
+
+	disabled := false
+	m.cfg.Typesafe.Enabled = &disabled
+	hint = stripANSI(m.hintBar())
+	if !strings.Contains(hint, "jev off") {
+		t.Fatalf("hint bar must show jev off when disabled:\n%s", hint)
+	}
+	if !strings.Contains(hint, "pinned glm-5.3") {
+		t.Fatalf("hint bar must keep the pinned indicator with jev off:\n%s", hint)
+	}
+
+	m.cfg.Typesafe.Enabled = nil
+	m.cfg.Typesafe.APIKey = ""
+	hint = stripANSI(m.hintBar())
+	if !strings.Contains(hint, "jev off") {
+		t.Fatalf("hint bar must show jev off without an api key:\n%s", hint)
+	}
+}
+
 func TestTurnAbortedRendersMarker(t *testing.T) {
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -1012,13 +1049,13 @@ func TestDiffBlockRendersColors(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolResult, Tool: "edit", Result: "edit done", Diff: diff}})
 
 	content := m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;79;214;190m+added line") {
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m+added line") {
 		t.Fatalf("diff block missing colDiffAdded ANSI:\n%q", content)
 	}
-	if !strings.Contains(content, "\x1b[38;2;197;59;83m-removed line") {
+	if !strings.Contains(content, "\x1b[38;2;226;101;95m-removed line") {
 		t.Fatalf("diff block missing colDiffRemoved ANSI:\n%q", content)
 	}
-	if !strings.Contains(content, "\x1b[38;2;128;128;128m context line") {
+	if !strings.Contains(content, "\x1b[38;2;142;136;120m context line") {
 		t.Fatalf("diff block missing colTextMuted context ANSI:\n%q", content)
 	}
 	plain := stripANSI(content)
@@ -1129,12 +1166,12 @@ func TestConfirmViewShowsDiff(t *testing.T) {
 	if addedIdx > hintIdx || removedIdx > hintIdx {
 		t.Fatalf("diff must render before y/n hint:\n%s", plain)
 	}
-	if !strings.Contains(view, "\x1b[38;2;79;214;190m") || !strings.Contains(view, "\x1b[38;2;197;59;83m") {
+	if !strings.Contains(view, "\x1b[38;2;142;199;172m") || !strings.Contains(view, "\x1b[38;2;226;101;95m") {
 		t.Fatalf("confirm view missing diff colors:\n%q", view)
 	}
 }
 
-func TestCompactionLineRendersMuted(t *testing.T) {
+func TestCompactionLineRendersSignal(t *testing.T) {
 	forceTrueColor(t)
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -1144,14 +1181,14 @@ func TestCompactionLineRendersMuted(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventCompaction, TokensBefore: 12400, TokensAfter: 3100}})
 
 	content := m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;128;128;128m⚡ context compacted (12.4k → 3.1k tokens)") {
-		t.Fatalf("compaction line missing colTextMuted ANSI:\n%q", content)
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m◈ context compacted (12.4k → 3.1k tokens)") {
+		t.Fatalf("compaction line missing colJade ANSI:\n%q", content)
 	}
 	plain := stripANSI(content)
-	if !strings.Contains(plain, "⚡ context compacted (12.4k → 3.1k tokens)") {
+	if !strings.Contains(plain, "◈ context compacted (12.4k → 3.1k tokens)") {
 		t.Fatalf("rendered content missing compaction line:\n%s", plain)
 	}
-	if !strings.Contains(strings.Join(m.contentPlain, "\n"), "⚡ context compacted (12.4k → 3.1k tokens)") {
+	if !strings.Contains(strings.Join(m.contentPlain, "\n"), "◈ context compacted (12.4k → 3.1k tokens)") {
 		t.Fatalf("copiable plain content missing compaction line:\n%s", strings.Join(m.contentPlain, "\n"))
 	}
 	if m.stream.String() != "partial " {
@@ -1188,7 +1225,7 @@ func TestWithFreshWarningRendersMuted(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	content := m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;128;128;128mno previous session — starting fresh") {
+	if !strings.Contains(content, "\x1b[38;2;142;136;120mno previous session — starting fresh") {
 		t.Fatalf("fresh warning missing colTextMuted ANSI:\n%q", content)
 	}
 	plain := stripANSI(content)
@@ -1226,7 +1263,7 @@ func TestResumedReconstructsBlocks(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	plain := stripANSI(m.contentRaw)
-	for _, want := range []string{"question 06", "answer 07", "result 08", "question 24", "▣"} {
+	for _, want := range []string{"question 06", "answer 07", "result 08", "question 24", "◇"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("resumed content missing %q:\n%s", want, plain)
 		}
@@ -1261,13 +1298,13 @@ func TestHintBarShowsResumed(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "resumed · 3 mensagens") {
+	if !strings.Contains(view, "resumed · 3 messages") {
 		t.Fatalf("hint bar missing resumed indicator:\n%s", view)
 	}
 
 	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	view = stripANSI(m.View())
-	if !strings.Contains(view, "resumed · 3 mensagens") {
+	if !strings.Contains(view, "resumed · 3 messages") {
 		t.Fatalf("hint bar must keep the resumed indicator after resize:\n%s", view)
 	}
 
@@ -1310,14 +1347,14 @@ func TestResumedRendersAssistantToolCalls(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, `● bash({"command":"ls"})`) {
+	if !strings.Contains(plain, `▶ bash({"command":"ls"})`) {
 		t.Fatalf("resumed content missing tool call line:\n%s", plain)
 	}
 	if !strings.Contains(plain, "file1 ⏎ file2") {
 		t.Fatalf("resumed content missing tool result line:\n%s", plain)
 	}
-	if n := strings.Count(plain, "▣"); n != 1 {
-		t.Fatalf("tool-call assistant must not render a turn mark, ▣ count = %d:\n%s", n, plain)
+	if n := strings.Count(plain, "◇"); n != 1 {
+		t.Fatalf("tool-call assistant must not render a turn mark, ◇ count = %d:\n%s", n, plain)
 	}
 	if !strings.Contains(plain, "here are your files") {
 		t.Fatalf("resumed content missing final answer:\n%s", plain)
@@ -1413,18 +1450,18 @@ func TestWarningRendersInline(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: done})
 
 	view := m.View()
-	if !strings.Contains(view, "\x1b[38;2;245;167;65mmax 5 file mentions") {
+	if !strings.Contains(view, "\x1b[38;2;224;138;73mmax 5 file mentions") {
 		t.Fatalf("warning missing colWarning ANSI:\n%q", view)
 	}
 	plain := stripANSI(view)
 	chatIdx := strings.Index(plain, "@f1.txt")
 	warnIdx := strings.Index(plain, "max 5 file mentions")
-	fadeIdx := strings.Index(plain, "╹")
-	if chatIdx < 0 || warnIdx < 0 || fadeIdx < 0 {
-		t.Fatalf("view missing chat/warning/fade markers:\n%s", plain)
+	promptIdx := strings.Index(plain, "❯")
+	if chatIdx < 0 || warnIdx < 0 || promptIdx < 0 {
+		t.Fatalf("view missing chat/warning/prompt markers:\n%s", plain)
 	}
-	if !(chatIdx < warnIdx && warnIdx < fadeIdx) {
-		t.Fatalf("warning must render between chat and prompt (chat=%d warn=%d fade=%d):\n%s", chatIdx, warnIdx, fadeIdx, plain)
+	if !(chatIdx < warnIdx && warnIdx < promptIdx) {
+		t.Fatalf("warning must render between chat and prompt (chat=%d warn=%d prompt=%d):\n%s", chatIdx, warnIdx, promptIdx, plain)
 	}
 
 	m.input.SetValue("plain question")
@@ -1470,14 +1507,14 @@ func TestPopupListsFilesOnAtSign(t *testing.T) {
 	}
 
 	view := m.View()
-	if !strings.Contains(view, "\x1b[38;2;250;178;131m▸ f01.txt") {
+	if !strings.Contains(view, "\x1b[38;2;240;168;63m▸ f01.txt") {
 		t.Fatalf("selected item missing colPrimary ANSI:\n%q", view)
 	}
-	if !strings.Contains(view, "\x1b[38;2;128;128;128m  f02.txt") {
+	if !strings.Contains(view, "\x1b[38;2;142;136;120m  f02.txt") {
 		t.Fatalf("popup items missing colTextMuted ANSI:\n%q", view)
 	}
 	plain := stripANSI(view)
-	chatIdx := strings.Index(plain, "No LLM gateway configured.")
+	chatIdx := strings.Index(plain, "No gateway connected.")
 	popupIdx := strings.Index(plain, "f01.txt")
 	promptIdx := strings.LastIndex(plain, "@")
 	if chatIdx < 0 || popupIdx < 0 || promptIdx < 0 {
@@ -1796,18 +1833,18 @@ func TestImageCommandAttaches(t *testing.T) {
 	}
 
 	view := m.View()
-	if !strings.Contains(view, "\x1b[38;2;92;156;245m🖼 shot.png ×") {
-		t.Fatalf("chip missing colSecondary ANSI:\n%q", view)
+	if !strings.Contains(view, "\x1b[38;2;240;168;63m▣ shot.png ×") {
+		t.Fatalf("chip missing colAmber ANSI:\n%q", view)
 	}
 	plain := stripANSI(view)
-	chatIdx := strings.Index(plain, "No LLM gateway configured.")
-	chipIdx := strings.Index(plain, "🖼 shot.png ×")
-	fadeIdx := strings.Index(plain, "╹")
-	if chatIdx < 0 || chipIdx < 0 || fadeIdx < 0 {
-		t.Fatalf("view missing chat/chip/fade markers:\n%s", plain)
+	chatIdx := strings.Index(plain, "No gateway connected.")
+	chipIdx := strings.Index(plain, "▣ shot.png ×")
+	promptIdx := strings.Index(plain, "❯")
+	if chatIdx < 0 || chipIdx < 0 || promptIdx < 0 {
+		t.Fatalf("view missing chat/chip/prompt markers:\n%s", plain)
 	}
-	if !(chatIdx < chipIdx && chipIdx < fadeIdx) {
-		t.Fatalf("chip must render between chat and prompt (chat=%d chip=%d fade=%d):\n%s", chatIdx, chipIdx, fadeIdx, plain)
+	if !(chatIdx < chipIdx && chipIdx < promptIdx) {
+		t.Fatalf("chip must render between chat and prompt (chat=%d chip=%d prompt=%d):\n%s", chatIdx, chipIdx, promptIdx, plain)
 	}
 
 	m.input.SetValue("/image " + filepath.Join(dir, "Camel.PNG"))
@@ -1818,7 +1855,7 @@ func TestImageCommandAttaches(t *testing.T) {
 	if !strings.HasPrefix(m.pendingAttachments[1].dataURI, "data:image/png;base64,") {
 		t.Fatalf("uppercase .PNG must map to image/png, got %q", m.pendingAttachments[1].dataURI)
 	}
-	if !strings.Contains(stripANSI(m.View()), "🖼 Camel.PNG ×") {
+	if !strings.Contains(stripANSI(m.View()), "▣ Camel.PNG ×") {
 		t.Fatalf("view missing second chip:\n%s", stripANSI(m.View()))
 	}
 	if want := 30 - defaultPromptHeight - viewChromeRows - 1; m.vp.Height != want {
@@ -1857,7 +1894,7 @@ func TestImageRejectsInvalid(t *testing.T) {
 	}
 
 	view := m.View()
-	if !strings.Contains(view, "\x1b[38;2;224;108;117m") {
+	if !strings.Contains(view, "\x1b[38;2;226;101;95m") {
 		t.Fatalf("attachment errors missing colError ANSI:\n%q", view)
 	}
 	plain := strings.ReplaceAll(stripANSI(m.contentRaw), "\n", "")
@@ -1874,7 +1911,7 @@ func TestImageRejectsInvalid(t *testing.T) {
 	if m.state != stateChat {
 		t.Fatalf("state = %q, want chat (prompt not aborted)", m.state)
 	}
-	if strings.Contains(stripANSI(m.View()), "🖼") {
+	if strings.Contains(stripANSI(m.View()), "▣") {
 		t.Fatalf("no chip should render for rejected attachments:\n%s", stripANSI(m.View()))
 	}
 	if want := 30 - defaultPromptHeight - viewChromeRows; m.vp.Height != want {
@@ -1907,10 +1944,10 @@ func TestUnimageRemovesAttachment(t *testing.T) {
 		t.Fatalf("remaining attachment = %q, want two.png", m.pendingAttachments[0].name)
 	}
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "🖼 two.png ×") {
+	if !strings.Contains(view, "▣ two.png ×") {
 		t.Fatalf("chip for two.png missing:\n%s", view)
 	}
-	if strings.Contains(view, "🖼 one.png ×") {
+	if strings.Contains(view, "▣ one.png ×") {
 		t.Fatalf("chip for one.png must be gone:\n%s", view)
 	}
 	if !strings.Contains(stripANSI(m.contentRaw), "removed one.png") {
@@ -2006,11 +2043,11 @@ func TestSendWithAttachmentsBuildsParts(t *testing.T) {
 	if !strings.Contains(plain, "what is in this image?") {
 		t.Fatalf("chat missing sent text:\n%s", plain)
 	}
-	if !strings.Contains(plain, "🖼 shot.png ×") {
+	if !strings.Contains(plain, "▣ shot.png ×") {
 		t.Fatalf("chat user block missing attachment chip:\n%s", plain)
 	}
-	if !strings.Contains(m.contentRaw, "\x1b[38;2;92;156;245m🖼 shot.png ×") {
-		t.Fatalf("user block chip missing colSecondary ANSI:\n%q", m.contentRaw)
+	if !strings.Contains(m.contentRaw, "\x1b[38;2;240;168;63m▣ shot.png ×") {
+		t.Fatalf("user block chip missing colAmber ANSI:\n%q", m.contentRaw)
 	}
 	if len(m.pendingAttachments) != 0 {
 		t.Fatalf("pendingAttachments = %d, want 0 after send", len(m.pendingAttachments))
@@ -2126,7 +2163,7 @@ func TestRoutingErrorPreservesAttachments(t *testing.T) {
 	if m.pendingAttachments[0].name != "shot.png" {
 		t.Fatalf("restored attachment = %q, want shot.png", m.pendingAttachments[0].name)
 	}
-	if !strings.Contains(stripANSI(m.View()), "🖼 shot.png ×") {
+	if !strings.Contains(stripANSI(m.View()), "▣ shot.png ×") {
 		t.Fatalf("chip must render again after restore:\n%s", stripANSI(m.View()))
 	}
 	if want := 30 - defaultPromptHeight - viewChromeRows - 1; m.vp.Height != want {
@@ -2172,22 +2209,22 @@ func TestNestedEventsRenderIndented(t *testing.T) {
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolResult, Tool: "bash", Result: "hi", Depth: 1}})
 
 	content := m.vp.View()
-	if !strings.Contains(content, "\x1b[38;2;92;156;245m  ⚡ sub-model · jev 0.80") {
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m  ◈ sub-model · jev 0.80") {
 		t.Fatalf("nested route missing 2-space colSecondary ANSI:\n%q", content)
 	}
-	if !strings.Contains(content, "\x1b[38;2;92;156;245m  ● bash({\"command\":\"echo hi\"})") {
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m  ▶ bash({\"command\":\"echo hi\"})") {
 		t.Fatalf("nested tool line missing 2-space colSecondary ANSI:\n%q", content)
 	}
-	if !strings.Contains(content, "\x1b[38;2;92;156;245m    hi") {
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m    ↳ hi") {
 		t.Fatalf("nested result missing colSecondary indent ANSI:\n%q", content)
 	}
-	if !strings.Contains(content, "\x1b[38;2;128;128;128m⚡ main-model · jev 0.90") {
-		t.Fatalf("main route must keep colTextMuted without indent:\n%q", content)
+	if !strings.Contains(content, "\x1b[38;2;142;199;172m◈ main-model · jev 0.90") {
+		t.Fatalf("main route must keep colJade without indent:\n%q", content)
 	}
 
 	plain := stripANSI(content)
-	mainIdx := strings.Index(plain, "⚡ main-model")
-	nestedIdx := strings.Index(plain, "  ⚡ sub-model")
+	mainIdx := strings.Index(plain, "◈ main-model")
+	nestedIdx := strings.Index(plain, "  ◈ sub-model")
 	if mainIdx < 0 || nestedIdx < 0 {
 		t.Fatalf("content missing main or nested route:\n%s", plain)
 	}
@@ -2208,7 +2245,7 @@ func TestNestedEventsRenderIndented(t *testing.T) {
 	}
 
 	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventRoute, Model: "deep-model", Router: "jev", Confidence: 0.7, Depth: 2}})
-	if !strings.Contains(m.vp.View(), "\x1b[38;2;92;156;245m    ⚡ deep-model · jev 0.70") {
+	if !strings.Contains(m.vp.View(), "\x1b[38;2;142;199;172m    ◈ deep-model · jev 0.70") {
 		t.Fatalf("depth 2 must indent 4 spaces in colSecondary:\n%q", m.vp.View())
 	}
 }
@@ -2226,7 +2263,7 @@ func TestHintBarShowsSubagentRunning(t *testing.T) {
 	if !strings.Contains(m.View(), "subagent running") {
 		t.Fatalf("view missing subagent running during task:\n%s", m.View())
 	}
-	if !strings.Contains(m.vp.View(), "\x1b[38;2;86;182;194m● task(") {
+	if !strings.Contains(m.vp.View(), "\x1b[38;2;142;199;172m▶ task(") {
 		t.Fatalf("task tool line must use the normal tool style without indent:\n%q", m.vp.View())
 	}
 	if !m.busy || !m.subagentActive {
@@ -2237,8 +2274,8 @@ func TestHintBarShowsSubagentRunning(t *testing.T) {
 	if hint := m.hintBar(); strings.Contains(hint, "subagent running") {
 		t.Fatalf("hint bar must drop subagent running after the task result:\n%s", hint)
 	}
-	if !strings.Contains(m.hintBar(), "Thinking") {
-		t.Fatalf("hint bar must show Thinking again while the turn continues:\n%s", m.hintBar())
+	if !strings.Contains(m.hintBar(), "thinking") {
+		t.Fatalf("hint bar must show thinking again while the turn continues:\n%s", m.hintBar())
 	}
 	if !m.busy {
 		t.Fatal("busy must remain true after the task result — the turn continues")
@@ -2579,30 +2616,32 @@ func nextAgentEvent(t *testing.T, ch chan agent.Event) agent.Event {
 }
 
 func legacyHintBar(m Model) string {
+	width := m.chatWidth()
 	left := ""
 	if m.busy {
+		verb := " thinking"
 		if m.subagentActive {
-			left = m.spin.View() + helpStyle.Render(" subagent running")
-		} else {
-			left = m.spin.View() + helpStyle.Render(" Thinking")
+			verb = " subagent running"
 		}
+		left = m.spin.View() + helpStyle.Render(verb)
 	} else {
-		left = helpStyle.Render(truncate(m.cwd, maxInt(m.width/3, 20)))
+		left = helpStyle.Render(truncate(m.cwd, maxInt(width/3, 20)))
 	}
 
+	sep := helpStyle.Render(" · ")
 	right := ""
 	if m.copyFlash != "" {
-		right += successStyle.Render(m.copyFlash) + helpStyle.Render(" · ")
+		right += successStyle.Render(m.copyFlash) + sep
 	}
 	if !m.follow {
 		right += warningStyle.Render("↑ scrolled") + helpStyle.Render(" · end to jump · ")
 	}
 	if m.busy {
-		right += warningStyle.Render("esc to interrupt") + helpStyle.Render(" · ")
+		right += warningStyle.Render("esc to interrupt") + sep
 	}
-	right += textStyle.Render("?") + helpStyle.Render(" commands")
+	right += primaryStyle.Render("/") + helpStyle.Render(" commands")
 	if m.resumedCount > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d mensagens", m.resumedCount))
+		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d messages", m.resumedCount))
 	}
 	if s := m.agent.ActiveSkill(); s != "" {
 		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
@@ -2610,29 +2649,48 @@ func legacyHintBar(m Model) string {
 	if m.agent.Mode() == "squad" {
 		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
 	}
+	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
+		right += helpStyle.Render(" · ") + primaryStyle.Render("jev")
+	} else {
+		right += helpStyle.Render(" · ") + warningStyle.Render("jev off")
+	}
 	if p := m.agent.Pinned(); p != "" {
 		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
 	}
 	if m.currentModel != "" {
-		right += helpStyle.Render(" · ") + textStyle.Render(m.currentModel)
+		right += helpStyle.Render(" · ") + routeStyle.Render(m.currentModel)
 	}
 	if m.sessionCost > 0 {
-		right += helpStyle.Render(" · " + formatCost(m.sessionCost))
+		right += helpStyle.Render(" · ") + routeStyle.Render(formatCost(m.sessionCost))
 	}
 	if m.lastTPS > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · %.0f tok/s", m.lastTPS))
+		right += helpStyle.Render(" · ") + routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS))
 	}
 
-	gap := m.width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
+	gap := width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
 	return strings.Repeat(" ", chatInset) + left + strings.Repeat(" ", gap) + right
 }
 
+func legacyPromptDeck(m Model) string {
+	lines := strings.Split(m.input.View(), "\n")
+	for i := range lines {
+		if i == 0 {
+			lines[i] = promptChevronStyle.Render("❯") + " " + lines[i]
+		} else {
+			lines[i] = "  " + lines[i]
+		}
+	}
+	style := promptDeckStyle
+	if m.busy {
+		style = promptDeckBusyStyle
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
 func legacyChatView(m Model) string {
-	prompt := indentLines(promptBoxStyle.Render(m.input.View()), chatInset)
-	corner := strings.Repeat(" ", chatInset) + fadeCornerStyle.Render("╹")
 	var b strings.Builder
 	b.WriteString(indentLines(m.vp.View(), chatInset))
 	b.WriteString("\n\n")
@@ -2652,16 +2710,22 @@ func legacyChatView(m Model) string {
 		b.WriteString(indentLines(popup, chatInset))
 		b.WriteString("\n")
 	}
+	if popup := m.modelPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
 	if chips := renderAttachmentChips(m.pendingAttachments); chips != "" {
 		b.WriteString(indentLines(chips, chatInset))
 		b.WriteString("\n")
 	}
-	b.WriteString(prompt)
-	b.WriteString("\n")
-	b.WriteString(corner)
+	b.WriteString(indentLines(legacyPromptDeck(m), chatInset))
 	b.WriteString("\n")
 	b.WriteString(legacyHintBar(m))
-	return b.String()
+	return lipgloss.NewStyle().
+		Background(colInk).
+		Width(m.width).
+		Height(m.height).
+		Render(forceBackground(b.String(), colInk))
 }
 
 func assertViewMatchesLegacy(t *testing.T, m Model, label string) {
@@ -2678,7 +2742,7 @@ func TestSDDViewByteIdenticalToPreSidebar(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
 	m.cwd = "/fixed/cwd"
 	m.blocks = append(m.blocks, userBlock("pergunta do usuário", nil))
-	m.blocks = append(m.blocks, indentLines(toolStyle.Render("● bash(ls)"), statusIndent))
+	m.blocks = append(m.blocks, indentLines(toolStyle.Render("▶ bash(ls)"), statusIndent))
 	m.mentionWarnings = []string{"max 5 file mentions"}
 	m.pendingAttachments = []attachment{{name: "shot.png", size: 7, dataURI: "data:image/png;base64,x"}}
 	m.copyFlash = "✓ copied 12 chars"
@@ -2712,8 +2776,8 @@ func TestSidebarVisibilityMatrix(t *testing.T) {
 		if strings.Contains(stripANSI(sdd.View()), "maestro") {
 			t.Fatalf("sdd view at %d cols must never render the sidebar", width)
 		}
-		if got := lipgloss.Width(sdd.View()); got != width-chatInset {
-			t.Fatalf("sdd view width at %d cols = %d, want %d (full chat span)", width, got, width-chatInset)
+		if got := lipgloss.Width(sdd.View()); got != width {
+			t.Fatalf("sdd view width at %d cols = %d, want %d (full chat span)", width, got, width)
 		}
 
 		sq := newSquadModel(t, width)
@@ -2722,8 +2786,8 @@ func TestSidebarVisibilityMatrix(t *testing.T) {
 			if strings.Contains(plain, "maestro") {
 				t.Fatalf("squad view at %d cols must omit the sidebar", width)
 			}
-			if got := lipgloss.Width(sq.View()); got != width-chatInset {
-				t.Fatalf("squad view width at %d cols = %d, want %d (full chat span)", width, got, width-chatInset)
+			if got := lipgloss.Width(sq.View()); got != width {
+				t.Fatalf("squad view width at %d cols = %d, want %d (full chat span)", width, got, width)
 			}
 			continue
 		}
@@ -2733,8 +2797,8 @@ func TestSidebarVisibilityMatrix(t *testing.T) {
 		if !strings.Contains(plain, "mesa not started") {
 			t.Fatalf("squad sidebar at %d cols missing the idle mesa state:\n%s", width, plain)
 		}
-		if got := lipgloss.Width(sq.View()); got != width-chatInset {
-			t.Fatalf("squad view width at %d cols = %d, want %d (chat + sidebar)", width, got, width-chatInset)
+		if got := lipgloss.Width(sq.View()); got != width {
+			t.Fatalf("squad view width at %d cols = %d, want %d (chat + sidebar)", width, got, width)
 		}
 	}
 }
@@ -2756,8 +2820,8 @@ func TestSidebarClampDerivesChatColumn(t *testing.T) {
 		if got := m.vp.Width; got != c.terminal-c.sidebar-2*chatInset {
 			t.Fatalf("vp.Width at %d cols = %d, want %d (chat column)", c.terminal, got, c.terminal-c.sidebar-2*chatInset)
 		}
-		if got := lipgloss.Width(m.View()); got != c.terminal-chatInset {
-			t.Fatalf("view width at %d cols = %d, want %d (chat + sidebar)", c.terminal, got, c.terminal-chatInset)
+		if got := lipgloss.Width(m.View()); got != c.terminal {
+			t.Fatalf("view width at %d cols = %d, want %d (chat + sidebar)", c.terminal, got, c.terminal)
 		}
 	}
 }
@@ -2765,7 +2829,7 @@ func TestSidebarClampDerivesChatColumn(t *testing.T) {
 func TestSidebarResizeKeepsPanelsIntact(t *testing.T) {
 	m := newSquadModel(t, 80)
 	m.blocks = append(m.blocks, userBlock("squad plan question", nil))
-	m.blocks = append(m.blocks, indentLines(toolStyle.Render("● bash(ls)"), statusIndent))
+	m.blocks = append(m.blocks, indentLines(toolStyle.Render("▶ bash(ls)"), statusIndent))
 	m.agent.RestoreMesa(&squad.Mesa{
 		Roles:           []string{"architect"},
 		MaxConvocations: 4,
@@ -2785,8 +2849,8 @@ func TestSidebarResizeKeepsPanelsIntact(t *testing.T) {
 	for _, s := range steps {
 		m = step(t, m, tea.WindowSizeMsg{Width: s.width, Height: 30})
 		view := m.View()
-		if got := lipgloss.Width(view); got != s.width-chatInset {
-			t.Fatalf("resize to %d: view width = %d, want %d", s.width, got, s.width-chatInset)
+		if got := lipgloss.Width(view); got != s.width {
+			t.Fatalf("resize to %d: view width = %d, want %d", s.width, got, s.width)
 		}
 		for i, line := range strings.Split(view, "\n") {
 			if got := lipgloss.Width(line); got > s.width {
@@ -2797,7 +2861,7 @@ func TestSidebarResizeKeepsPanelsIntact(t *testing.T) {
 		if !strings.Contains(plain, "squad plan question") {
 			t.Fatalf("resize to %d: chat content lost:\n%s", s.width, plain)
 		}
-		if !strings.Contains(plain, "● bash(ls)") {
+		if !strings.Contains(plain, "▶ bash(ls)") {
 			t.Fatalf("resize to %d: tool line lost:\n%s", s.width, plain)
 		}
 		if s.sidebar == 0 {
@@ -2924,8 +2988,8 @@ func TestRestoreMesaRebuildsPanelAfterResume(t *testing.T) {
 			t.Fatalf("resumed panel missing %q:\n%s", want, plain)
 		}
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("resumed view width = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("resumed view width = %d, want %d", got, 200)
 	}
 
 	legacy := agent.New(nil, nil, nil, cat, nil, nil, false)
@@ -2962,8 +3026,8 @@ func TestModeSwitchTogglesSidebarWithoutRestart(t *testing.T) {
 	if got := m.vp.Width; got != 200-2*chatInset {
 		t.Fatalf("vp.Width = %d, want the full width restored", got)
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("view width = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("view width = %d, want %d", got, 200)
 	}
 
 	m.openModePopup()
@@ -2980,8 +3044,8 @@ func TestModeSwitchTogglesSidebarWithoutRestart(t *testing.T) {
 	if got := m.vp.Width; got != 200-40-2*chatInset {
 		t.Fatalf("vp.Width = %d, want the chat column again", got)
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("view width = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("view width = %d, want %d", got, 200)
 	}
 }
 
@@ -3140,8 +3204,8 @@ func TestSquadFlowSidebarIntegration(t *testing.T) {
 		for {
 			e := nextAgentEvent(t, ag.Events)
 			m = step(t, m, agentEventMsg{event: e})
-			if got := lipgloss.Width(m.View()); got != 200-chatInset {
-				t.Fatalf("event %s: view width = %d, want %d", e.Kind, got, 200-chatInset)
+			if got := lipgloss.Width(m.View()); got != 200 {
+				t.Fatalf("event %s: view width = %d, want %d", e.Kind, got, 200)
 			}
 			if match(e) {
 				return
@@ -3381,8 +3445,8 @@ func TestResumeContinueRebuildsSquadPanel(t *testing.T) {
 	if !strings.Contains(chat, "maestro") {
 		t.Fatalf("resumed view missing the sidebar:\n%s", chat)
 	}
-	if got := lipgloss.Width(m2.View()); got != 200-chatInset {
-		t.Fatalf("resumed view width = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m2.View()); got != 200 {
+		t.Fatalf("resumed view width = %d, want %d", got, 200)
 	}
 }
 
@@ -3432,8 +3496,8 @@ func TestResumePreFeatureSnapshotRendersMesaNotStarted(t *testing.T) {
 	if !strings.Contains(plain, "old converged plan") {
 		t.Fatalf("pre-feature resume missing the legacy chat:\n%s", plain)
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("pre-feature resumed view width = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("pre-feature resumed view width = %d, want %d", got, 200)
 	}
 	panel := stripANSI(m.sidebarView(m.sidebarWidth()))
 	if strings.Contains(panel, "convocations") || strings.Contains(panel, "/") {
@@ -3534,8 +3598,8 @@ func TestSquadFullFlowModeTogglePreservesMesa(t *testing.T) {
 	if rebuilt.Tokens != 0 || rebuilt.Convocations != 0 {
 		t.Fatalf("rebuilt counters = %d/%d, want 0/0 reset for the new turn", rebuilt.Tokens, rebuilt.Convocations)
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("view width after the rekickoff = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("view width after the rekickoff = %d, want %d", got, 200)
 	}
 }
 
@@ -3621,7 +3685,7 @@ func TestSquadEscMidConvocationPanelReflectsFinalState(t *testing.T) {
 			t.Fatalf("panel must reflect the final mesa state after esc, missing %q:\n%s", want, panel)
 		}
 	}
-	if got := lipgloss.Width(m.View()); got != 200-chatInset {
-		t.Fatalf("view width after the abort = %d, want %d", got, 200-chatInset)
+	if got := lipgloss.Width(m.View()); got != 200 {
+		t.Fatalf("view width after the abort = %d, want %d", got, 200)
 	}
 }

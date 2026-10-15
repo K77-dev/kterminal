@@ -22,7 +22,6 @@ import (
 	"kterminal/internal/catalog"
 	"kterminal/internal/clipboard"
 	"kterminal/internal/config"
-	"kterminal/internal/jev"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
@@ -47,7 +46,7 @@ const minViewportRows = 3
 const chatInset = 2
 const statusIndent = 3
 const maxPromptHistory = 20
-const viewChromeRows = 5
+const viewChromeRows = 4
 const maxAttachmentBytes = 5 * 1024 * 1024
 
 var imageMimes = map[string]string{
@@ -115,6 +114,9 @@ type Model struct {
 	modeOpen     bool
 	modeSelected int
 
+	modelOpen     bool
+	modelSelected int
+
 	pendingUserQueue []string
 
 	currentModel    string
@@ -127,6 +129,7 @@ type Model struct {
 
 	cfgInputs []textinput.Model
 	cfgFocus  int
+	cfgError  string
 
 	pendingConfirm *agent.Event
 	pendingAsk     *agent.Event
@@ -170,13 +173,14 @@ func New(ag *agent.Agent, cfg *config.Config, cat *catalog.Catalog, dark bool, o
 	input.Prompt = ""
 	input.ShowLineNumbers = false
 	input.Cursor.SetMode(cursor.CursorStatic)
-	input.Cursor.Style = lipgloss.NewStyle().Background(colBg).Foreground(colPrimary)
+	input.Cursor.Style = lipgloss.NewStyle().Background(colAmber).Foreground(colInk)
 	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	input.FocusedStyle.Text = lipgloss.NewStyle()
 	input.SetHeight(defaultPromptHeight)
 	blink := input.Focus()
 
 	spin := spinner.New(spinner.WithSpinner(thinkingFrames))
+	spin.Style = lipgloss.NewStyle().Foreground(colAmber)
 
 	cwd, _ := os.Getwd()
 
@@ -226,14 +230,14 @@ func resumedMessageBlocks(msg llm.Message, width int, dark bool) []string {
 			blocks = append(blocks, md)
 		}
 		for _, tc := range msg.ToolCalls {
-			blocks = append(blocks, indentLines(toolStyle.Render(fmt.Sprintf("● %s(%s)", tc.Function.Name, firstLine(tc.Function.Arguments, 100))), statusIndent))
+			blocks = append(blocks, indentLines(toolStyle.Render(fmt.Sprintf("▶ %s(%s)", tc.Function.Name, firstLine(tc.Function.Arguments, 100))), statusIndent))
 		}
 		if len(msg.ToolCalls) == 0 {
-			blocks = append(blocks, indentLines(metaMarkStyle.Render("▣"), statusIndent))
+			blocks = append(blocks, indentLines(metaMarkStyle.Render("◇"), statusIndent))
 		}
 		return blocks
 	case "tool":
-		return []string{indentLines(resultStyle.Render(truncate(strings.ReplaceAll(msg.Content, "\n", " ⏎ "), 160)), statusIndent)}
+		return []string{indentLines(resultStyle.Render("↳ "+truncate(strings.ReplaceAll(msg.Content, "\n", " ⏎ "), 160)), statusIndent)}
 	}
 	return nil
 }
@@ -263,7 +267,17 @@ func newConfigInputs(cfg *config.Config) []textinput.Model {
 	skipTLS.SetValue(boolToYesNo(cfg.LLM.SkipTLSVerify))
 	skipTLS.CharLimit = 3
 
-	return []textinput.Model{url, llmKey, jevKey, skipTLS}
+	jevEnabled := textinput.New()
+	jevEnabled.Placeholder = "yes/no"
+	jevEnabled.SetValue(boolToYesNo(cfg.Typesafe.JevEnabled()))
+	jevEnabled.CharLimit = 3
+
+	model := textinput.New()
+	model.Placeholder = "model name (empty = auto)"
+	model.SetValue(cfg.Model)
+	model.CharLimit = 0
+
+	return []textinput.Model{url, llmKey, jevKey, skipTLS, jevEnabled, model}
 }
 
 func boolToYesNo(b bool) string {
@@ -400,7 +414,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.flushPendingQueue()
 		m.currentModel = e.Model
 		m.routerInfo = fmt.Sprintf("%s %.2f", e.Router, e.Confidence)
-		route := fmt.Sprintf("⚡ %s · %s", e.Model, m.routerInfo)
+		route := fmt.Sprintf("◈ %s · %s", e.Model, m.routerInfo)
 		if e.Reason != "" {
 			route += " · " + truncate(e.Reason, 80)
 		}
@@ -408,7 +422,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.blocks = append(m.blocks, line)
 		m.refreshContent()
 	case agent.EventCompaction:
-		line := indentLines(compactionStyle.Render(fmt.Sprintf("⚡ context compacted (%s → %s tokens)", formatTokensK(e.TokensBefore), formatTokensK(e.TokensAfter))), statusIndent)
+		line := indentLines(compactionStyle.Render(fmt.Sprintf("◈ context compacted (%s → %s tokens)", formatTokensK(e.TokensBefore), formatTokensK(e.TokensAfter))), statusIndent)
 		m.blocks = append(m.blocks, line)
 		m.refreshContent()
 	case agent.EventKickoff:
@@ -419,7 +433,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.currentModel = e.Model
 		m.refreshContent()
 	case agent.EventToolStart:
-		line := indentLines(toolStyle.Render(fmt.Sprintf("● %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent)
+		line := indentLines(toolStyle.Render(fmt.Sprintf("▶ %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent)
 		m.blocks = append(m.blocks, line)
 		if e.Tool == taskTool {
 			m.subagentActive = true
@@ -432,7 +446,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.refreshContent()
 	case agent.EventToolResult:
 		m.resetLiveBlock()
-		line := indentLines(resultStyle.Render(truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent)
+		line := indentLines(resultStyle.Render("↳ "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent)
 		m.blocks = append(m.blocks, line)
 		if block := renderDiffBlock(e.Diff); block != "" {
 			m.blocks = append(m.blocks, block)
@@ -458,7 +472,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		if md := renderMarkdown(m.stream.String(), m.mdWidth, m.dark); md != "" {
 			m.blocks = append(m.blocks, md)
 		}
-		meta := indentLines(metaMarkStyle.Render("▣ ")+metaStyle.Render(turnMeta(e, turnCost, m.routerInfo)), statusIndent)
+		meta := indentLines(metaMarkStyle.Render("◇ ")+metaStyle.Render(turnMeta(e, turnCost, m.routerInfo)), statusIndent)
 		m.blocks = append(m.blocks, meta)
 		m.stream.Reset()
 		m.busy = false
@@ -469,7 +483,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		if md := renderMarkdown(m.stream.String(), m.mdWidth, m.dark); md != "" {
 			m.blocks = append(m.blocks, md)
 		}
-		meta := indentLines(metaMarkStyle.Render("⊘ ")+metaStyle.Render(abortMeta(e)), statusIndent)
+		meta := indentLines(abortMarkStyle.Render("⊘ ")+metaStyle.Render(abortMeta(e)), statusIndent)
 		m.blocks = append(m.blocks, meta)
 		m.stream.Reset()
 		m.resetLiveBlock()
@@ -482,7 +496,7 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 			m.fitViewportHeight()
 		}
 		m.sentAttachments = nil
-		m.blocks = append(m.blocks, errorBoxStyle.Render(e.Text))
+		m.blocks = append(m.blocks, errorBox(e.Text))
 		m.stream.Reset()
 		m.resetLiveBlock()
 		m.busy = false
@@ -495,9 +509,9 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 func (m *Model) handleNestedEvent(e agent.Event) {
 	switch e.Kind {
 	case agent.EventRoute:
-		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("⚡ %s · %s %.2f", e.Model, e.Router, e.Confidence)), statusIndent))
+		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("◈ %s · %s %.2f", e.Model, e.Router, e.Confidence)), statusIndent))
 	case agent.EventToolStart:
-		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("● %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent))
+		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+fmt.Sprintf("▶ %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent))
 		if e.Agent != "" {
 			if m.personaActivity == nil {
 				m.personaActivity = make(map[string]string)
@@ -505,7 +519,7 @@ func (m *Model) handleNestedEvent(e agent.Event) {
 			m.personaActivity[e.Agent] = fmt.Sprintf("%s(%s)", e.Tool, firstLine(e.Args, 100))
 		}
 	case agent.EventToolResult:
-		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+"  "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent))
+		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+"  ↳ "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent))
 	case agent.EventConfirm:
 		ev := e
 		m.pendingConfirm = &ev
@@ -640,6 +654,25 @@ func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "down":
 			if n := len(modeOptions); n > 0 {
 				m.modeSelected = (m.modeSelected + 1) % n
+			}
+			return m, nil
+		}
+	}
+	if m.modelOpen {
+		switch msg.String() {
+		case "tab", "enter":
+			return m.selectModel()
+		case "esc":
+			m.closeModelPopup()
+			return m, nil
+		case "up":
+			if n := len(m.modelChoices()); n > 0 {
+				m.modelSelected = (m.modelSelected - 1 + n) % n
+			}
+			return m, nil
+		case "down":
+			if n := len(m.modelChoices()); n > 0 {
+				m.modelSelected = (m.modelSelected + 1) % n
 			}
 			return m, nil
 		}
@@ -790,7 +823,7 @@ func (m *Model) fitChatColumn() {
 	if w > 6 {
 		m.mdWidth = w - 6
 	}
-	if iw := w - 2*chatInset - 5; iw > 0 {
+	if iw := w - 2*chatInset - 6; iw > 0 {
 		m.input.MaxWidth = iw
 		m.input.SetWidth(iw)
 	}
@@ -836,7 +869,7 @@ func (m *Model) enqueueUserMessage(text string) (tea.Model, tea.Cmd) {
 	m.agent.EnqueueUserMessage(text)
 	m.pendingUserQueue = append(m.pendingUserQueue, text)
 	m.blocks = append(m.blocks, userBlock(text, nil))
-	m.blocks = append(m.blocks, resultStyle.Render("⏳ queued for the squad — consumed between convocations"))
+	m.blocks = append(m.blocks, resultStyle.Render("◷ queued for the squad — consumed between convocations"))
 	m.pushPromptHistory(text)
 	m.refreshContent()
 	return m, nil
@@ -847,7 +880,7 @@ func (m *Model) flushPendingQueue() {
 		return
 	}
 	for range m.pendingUserQueue {
-		m.blocks = append(m.blocks, resultStyle.Render("✓ squad consumed the queued message"))
+		m.blocks = append(m.blocks, successStyle.Render("✓ squad consumed the queued message"))
 	}
 	m.pendingUserQueue = nil
 }
@@ -1008,7 +1041,8 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 	case "/help":
 		lines := []string{
 			"/config — configure gateway and API keys",
-			"/model <name> — pin a model · /model auto — let Jev decide",
+			"/jev on|off — toggle Jev routing · /jev — show state",
+			"/model <name> — pin a model, persisted across restarts · /model auto — let Jev decide",
 			"/mode — switch between sdd and squad modes",
 			"/image <path> — attach an image · /image — list pending · /unimage <n> — remove",
 			"/clear — clear the conversation",
@@ -1035,32 +1069,20 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 	case "/config":
 		m.cfgInputs = newConfigInputs(m.cfg)
 		m.cfgFocus = 0
+		m.cfgError = ""
 		for i := range m.cfgInputs {
 			m.cfgInputs[i].Blur()
 		}
 		m.cfgInputs[0].Focus()
 		m.state = stateConfig
 		return m, nil
+	case "/jev":
+		return m.handleJevCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
 	case "/mode":
 		m.openModePopup()
 		return m, nil
 	case "/model":
-		if len(parts) < 2 || parts[1] == "auto" {
-			m.agent.SetPinned("")
-			m.blocks = append(m.blocks, resultStyle.Render("model pin removed — Jev decides again"))
-			m.refreshContent()
-			return m, nil
-		}
-		name := parts[1]
-		if _, ok := m.catalog.Get(name); !ok {
-			m.blocks = append(m.blocks, errorBoxStyle.Render("unknown model "+name+" — not in catalog"))
-			m.refreshContent()
-			return m, nil
-		}
-		m.agent.SetPinned(name)
-		m.blocks = append(m.blocks, primaryStyle.Render("model pinned: "+name))
-		m.refreshContent()
-		return m, nil
+		return m.handleModelCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
 	case "/image":
 		arg := strings.TrimSpace(strings.TrimPrefix(cmdline, cmd))
 		if arg == "" {
@@ -1072,7 +1094,7 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/unimage":
 		if len(parts) < 2 {
-			m.blocks = append(m.blocks, errorBoxStyle.Render("/unimage <n> — n is the attachment number (see /image)"))
+			m.blocks = append(m.blocks, errorBox("/unimage <n> — n is the attachment number (see /image)"))
 			m.refreshContent()
 			return m, nil
 		}
@@ -1083,7 +1105,7 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		if strings.HasPrefix(cmd, kspecCommandPrefix) {
 			return m.handleKspecCommand(cmdline)
 		}
-		m.blocks = append(m.blocks, errorBoxStyle.Render("unknown command "+cmd+" — /help"))
+		m.blocks = append(m.blocks, errorBox("unknown command "+cmd+" — /help"))
 		m.refreshContent()
 		return m, nil
 	}
@@ -1127,7 +1149,7 @@ func (m *Model) attachImage(path string) {
 }
 
 func (m *Model) attachmentError(msg string) {
-	m.blocks = append(m.blocks, errorBoxStyle.Render(msg))
+	m.blocks = append(m.blocks, errorBox(msg))
 }
 
 func (m *Model) listPendingAttachments() {
@@ -1164,7 +1186,7 @@ func renderAttachmentChips(atts []attachment) string {
 	}
 	chips := make([]string, len(atts))
 	for i, att := range atts {
-		chips[i] = chipStyle.Render(fmt.Sprintf("🖼 %s ×", att.name))
+		chips[i] = chipStyle.Render(fmt.Sprintf("▣ %s ×", att.name))
 	}
 	return strings.Join(chips, " ")
 }
@@ -1174,6 +1196,10 @@ func userBlock(text string, atts []attachment) string {
 		return userBoxStyle.Render(text)
 	}
 	return userBoxStyle.Render(text + "\n" + renderAttachmentChips(atts))
+}
+
+func errorBox(text string) string {
+	return errorBoxStyle.Render(text)
 }
 
 func attachmentParts(text string, atts []attachment) []llm.ContentPart {
@@ -1238,12 +1264,23 @@ func (m Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) saveConfig() (tea.Model, tea.Cmd) {
+	model := strings.TrimSpace(m.cfgInputs[5].Value())
+	if model != "" {
+		if _, ok := m.catalog.Get(model); !ok {
+			m.cfgError = "unknown model " + model + " — not in catalog"
+			return m, nil
+		}
+	}
+	m.cfgError = ""
+	enabled := yesNoToBool(m.cfgInputs[4].Value())
 	m.cfg.LLM.BaseURL = strings.TrimSpace(m.cfgInputs[0].Value())
 	m.cfg.LLM.APIKey = strings.TrimSpace(m.cfgInputs[1].Value())
 	m.cfg.Typesafe.APIKey = strings.TrimSpace(m.cfgInputs[2].Value())
 	m.cfg.LLM.SkipTLSVerify = yesNoToBool(m.cfgInputs[3].Value())
+	m.cfg.Typesafe.Enabled = &enabled
+	m.cfg.Model = model
 	if err := m.cfg.Save(); err != nil {
-		m.blocks = append(m.blocks, errorBoxStyle.Render("failed to save config: "+err.Error()))
+		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
 	} else {
 		m.rebuildAgent()
 		m.blocks = append(m.blocks, resultStyle.Render("config saved — gateway "+m.cfg.LLM.BaseURL))
@@ -1264,17 +1301,10 @@ func (m *Model) rebuildAgent() {
 			MaxRetries:       m.cfg.LLM.MaxRetries,
 		})
 	}
-	var jevRouter, fallback router.Router
-	if m.cfg.Typesafe.APIKey != "" {
-		jevRouter = router.NewJev(jev.New(m.cfg.Typesafe.APIKey))
-	}
-	fallback = &router.HeuristicRouter{Default: m.catalog.DefaultModel}
-	if jevRouter == nil {
-		jevRouter = fallback
-		fallback = nil
-	}
+	primary, fallback := router.Wire(m.cfg.Typesafe.APIKey, m.cfg.Typesafe.JevEnabled(), m.cfg.Model, m.catalog)
 	m.agent.SetLLM(llmClient)
-	m.agent.SetRouters(jevRouter, fallback)
+	m.agent.SetRouters(primary, fallback)
+	m.agent.SetPinned(m.cfg.Model)
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1385,19 +1415,21 @@ func (m Model) emptyState() string {
 	b.WriteString(renderLogo())
 	b.WriteString("\n\n")
 	if !m.cfg.Ready() {
-		b.WriteString(textStyle.Render("No LLM gateway configured."))
+		b.WriteString(textStyle.Render("No gateway connected."))
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("Run "))
 		b.WriteString(primaryStyle.Render("/config"))
-		b.WriteString(helpStyle.Render(" to set your gateway base URL and API keys."))
+		b.WriteString(helpStyle.Render(" to set a base URL and API keys."))
 		b.WriteString("\n\n")
 		b.WriteString(helpStyle.Render("Jev will pick the best model for every single call."))
 	} else {
-		b.WriteString(textStyle.Render("Jev decides which model handles every call."))
+		b.WriteString(textStyle.Render("Jev weighs quality, cost and measured speed — then picks the model for every single call."))
 		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("quality · cost · speed — balanced per step. No model picking."))
-		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("type /help for commands · /model <name> to pin"))
+		b.WriteString(helpStyle.Render("no model picking · "))
+		b.WriteString(primaryStyle.Render("/help"))
+		b.WriteString(helpStyle.Render(" for commands · "))
+		b.WriteString(primaryStyle.Render("/model <name>"))
+		b.WriteString(helpStyle.Render(" to pin"))
 	}
 	return b.String()
 }
@@ -1406,28 +1438,29 @@ func (m Model) hintBar() string {
 	width := m.chatWidth()
 	left := ""
 	if m.busy {
+		verb := " thinking"
 		if m.subagentActive {
-			left = m.spin.View() + helpStyle.Render(" subagent running")
-		} else {
-			left = m.spin.View() + helpStyle.Render(" Thinking")
+			verb = " subagent running"
 		}
+		left = m.spin.View() + helpStyle.Render(verb)
 	} else {
 		left = helpStyle.Render(truncate(m.cwd, maxInt(width/3, 20)))
 	}
 
+	sep := helpStyle.Render(" · ")
 	right := ""
 	if m.copyFlash != "" {
-		right += successStyle.Render(m.copyFlash) + helpStyle.Render(" · ")
+		right += successStyle.Render(m.copyFlash) + sep
 	}
 	if !m.follow {
 		right += warningStyle.Render("↑ scrolled") + helpStyle.Render(" · end to jump · ")
 	}
 	if m.busy {
-		right += warningStyle.Render("esc to interrupt") + helpStyle.Render(" · ")
+		right += warningStyle.Render("esc to interrupt") + sep
 	}
-	right += textStyle.Render("?") + helpStyle.Render(" commands")
+	right += primaryStyle.Render("/") + helpStyle.Render(" commands")
 	if m.resumedCount > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d mensagens", m.resumedCount))
+		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d messages", m.resumedCount))
 	}
 	if s := m.agent.ActiveSkill(); s != "" {
 		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
@@ -1435,17 +1468,22 @@ func (m Model) hintBar() string {
 	if m.agent.Mode() == "squad" {
 		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
 	}
+	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
+		right += helpStyle.Render(" · ") + primaryStyle.Render("jev")
+	} else {
+		right += helpStyle.Render(" · ") + warningStyle.Render("jev off")
+	}
 	if p := m.agent.Pinned(); p != "" {
 		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
 	}
 	if m.currentModel != "" {
-		right += helpStyle.Render(" · ") + textStyle.Render(m.currentModel)
+		right += helpStyle.Render(" · ") + routeStyle.Render(m.currentModel)
 	}
 	if m.sessionCost > 0 {
-		right += helpStyle.Render(" · " + formatCost(m.sessionCost))
+		right += helpStyle.Render(" · ") + routeStyle.Render(formatCost(m.sessionCost))
 	}
 	if m.lastTPS > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · %.0f tok/s", m.lastTPS))
+		right += helpStyle.Render(" · ") + routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS))
 	}
 
 	gap := width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
@@ -1466,25 +1504,31 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return "loading…"
 	}
+	var content string
 	switch m.state {
 	case stateConfig:
-		return m.configView()
+		content = m.configView()
 	case stateConfirm:
-		return m.confirmView()
+		content = m.confirmView()
 	case stateAsk:
-		return m.askView()
+		content = m.askView()
+	default:
+		chat := m.chatView()
+		width := m.sidebarWidth()
+		if width <= 0 {
+			content = chat
+		} else {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, chat, m.sidebarView(width))
+		}
 	}
-	chat := m.chatView()
-	width := m.sidebarWidth()
-	if width <= 0 {
-		return chat
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, chat, m.sidebarView(width))
+	return lipgloss.NewStyle().
+		Background(colInk).
+		Width(m.width).
+		Height(m.height).
+		Render(forceBackground(content, colInk))
 }
 
 func (m Model) chatView() string {
-	prompt := indentLines(promptBoxStyle.Render(m.input.View()), chatInset)
-	corner := strings.Repeat(" ", chatInset) + fadeCornerStyle.Render("╹")
 	var b strings.Builder
 	b.WriteString(indentLines(m.vp.View(), chatInset))
 	b.WriteString("\n\n")
@@ -1504,22 +1548,40 @@ func (m Model) chatView() string {
 		b.WriteString(indentLines(popup, chatInset))
 		b.WriteString("\n")
 	}
+	if popup := m.modelPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
 	if chips := renderAttachmentChips(m.pendingAttachments); chips != "" {
 		b.WriteString(indentLines(chips, chatInset))
 		b.WriteString("\n")
 	}
-	b.WriteString(prompt)
-	b.WriteString("\n")
-	b.WriteString(corner)
+	b.WriteString(indentLines(m.promptDeckView(), chatInset))
 	b.WriteString("\n")
 	b.WriteString(m.hintBar())
 	return b.String()
 }
 
+func (m Model) promptDeckView() string {
+	lines := strings.Split(m.input.View(), "\n")
+	for i := range lines {
+		if i == 0 {
+			lines[i] = promptChevronStyle.Render("❯") + " " + lines[i]
+		} else {
+			lines[i] = "  " + lines[i]
+		}
+	}
+	style := promptDeckStyle
+	if m.busy {
+		style = promptDeckBusyStyle
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
 func (m Model) configView() string {
-	labels := []string{"LiteLLM base URL", "LiteLLM API key", "Typesafe (Jev) API key", "Skip TLS verification (yes/no)"}
+	labels := []string{"LiteLLM base URL", "LiteLLM API key", "Typesafe (Jev) API key", "Skip TLS verification (yes/no)", "Jev enabled (yes/no)", "Model"}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("config"))
+	b.WriteString(titleStyle.Render("CONFIG"))
 	b.WriteString("\n\n")
 	for i, input := range m.cfgInputs {
 		box := configBoxStyle
@@ -1529,6 +1591,10 @@ func (m Model) configView() string {
 		b.WriteString(labelStyle.Render(labels[i]))
 		b.WriteString("\n")
 		b.WriteString(box.Render(input.View()))
+		b.WriteString("\n\n")
+	}
+	if m.cfgError != "" {
+		b.WriteString(errorBox(m.cfgError))
 		b.WriteString("\n\n")
 	}
 	b.WriteString(helpStyle.Render("tab/↑↓ move · enter next/save · esc cancel"))
@@ -1549,6 +1615,6 @@ func (m Model) confirmView() string {
 		b.WriteString(block)
 		b.WriteString("\n\n")
 	}
-	b.WriteString(helpStyle.Render("y approve · n decline"))
+	b.WriteString(primaryStyle.Render("y") + helpStyle.Render(" approve · ") + primaryStyle.Render("n") + helpStyle.Render(" decline"))
 	return confirmBoxStyle.Render(b.String())
 }

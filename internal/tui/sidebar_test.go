@@ -81,7 +81,7 @@ func TestSidebarViewRendersPopulatedMesa(t *testing.T) {
 	plain := stripANSI(view)
 
 	for _, want := range []string{
-		"squad",
+		"SQUAD",
 		"maestro",
 		"waiting",
 		"architect",
@@ -249,7 +249,7 @@ func TestSidebarTokensLineWarnsOverBudget(t *testing.T) {
 		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDone}},
 	})
 	view := m.sidebarView(m.sidebarWidth())
-	if !strings.Contains(view, "\x1b[38;2;245;167;65m12.4k/10.0k tokens") {
+	if !strings.Contains(view, "\x1b[38;2;224;138;73m12.4k/10.0k tokens") {
 		t.Fatalf("over-budget tokens line missing the warning color:\n%q", view)
 	}
 
@@ -261,7 +261,7 @@ func TestSidebarTokensLineWarnsOverBudget(t *testing.T) {
 		Entries:         []squad.MesaEntry{{Name: "architect", Discipline: "architecture", Status: squad.StatusDone}},
 	})
 	view = m.sidebarView(m.sidebarWidth())
-	if strings.Contains(view, "\x1b[38;2;245;167;65m12.4k/20.0k tokens") {
+	if strings.Contains(view, "\x1b[38;2;224;138;73m12.4k/20.0k tokens") {
 		t.Fatalf("under-budget tokens line must keep the help styling:\n%q", view)
 	}
 	if plain := stripANSI(view); !strings.Contains(plain, "12.4k/20.0k tokens") {
@@ -279,7 +279,7 @@ func TestSidebarReusesDisciplineColor(t *testing.T) {
 	}
 	m.agent.RestoreMesa(mesa)
 	view := m.sidebarView(m.sidebarWidth())
-	if !strings.Contains(view, "\x1b[38;2;157;124;216m▸ architect") {
+	if !strings.Contains(view, "\x1b[38;2;201;162;104m▸ architect") {
 		t.Fatalf("persona name missing the architecture discipline color:\n%q", view)
 	}
 	plain := stripANSI(view)

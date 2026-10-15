@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -15,7 +16,7 @@ const maxHelpLineRunes = 72
 const kspecKickoffPrefix = "Begin the "
 const kspecKickoffSuffix = " workflow now."
 
-var nativeCommands = []string{"/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/unimage"}
+var nativeCommands = []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
 
 var modeOptions = []string{"sdd", "squad"}
 
@@ -140,7 +141,7 @@ func (m Model) selectMode() (tea.Model, tea.Cmd) {
 	mode := modeOptions[m.modeSelected]
 	m.closeModePopup()
 	if err := m.agent.ActivateMode(mode); err != nil {
-		m.blocks = append(m.blocks, errorBoxStyle.Render(err.Error()))
+		m.blocks = append(m.blocks, errorBox(err.Error()))
 	} else {
 		m.blocks = append(m.blocks, primaryStyle.Render("mode: "+mode))
 	}
@@ -154,7 +155,7 @@ func (m Model) modePopupView() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(labelStyle.Render("mode"))
+	b.WriteString(chromeLabelStyle.Render("MODE"))
 	b.WriteString("\n")
 	for i, item := range modeOptions {
 		if i > 0 {
@@ -169,13 +170,184 @@ func (m Model) modePopupView() string {
 	return mentionPopupStyle.Render(b.String())
 }
 
+type modelChoice struct {
+	model string
+	label string
+}
+
+func (m Model) modelChoices() []modelChoice {
+	choices := make([]modelChoice, 0, len(m.catalog.Models)+1)
+	choices = append(choices, modelChoice{label: "auto"})
+	for _, mm := range m.catalog.Models {
+		tps := mm.TPSEstimate
+		if mm.MeasuredTPS > 0 {
+			tps = mm.MeasuredTPS
+		}
+		choices = append(choices, modelChoice{
+			model: mm.Name,
+			label: fmt.Sprintf("%s · $%.2f/$%.2f · ~%.0f tok/s", mm.Name, mm.InputPricePerM, mm.OutputPricePerM, tps),
+		})
+	}
+	return choices
+}
+
+func (m *Model) closeModelPopup() {
+	m.modelOpen = false
+	m.modelSelected = 0
+}
+
+func (m *Model) openModelPopup() {
+	m.closeCommandPopup()
+	m.modelOpen = true
+	m.modelSelected = 0
+	if pin := m.agent.Pinned(); pin != "" {
+		for i, choice := range m.modelChoices() {
+			if choice.model == pin {
+				m.modelSelected = i
+			}
+		}
+	}
+}
+
+func (m Model) handleModelCommand(arg string) (tea.Model, tea.Cmd) {
+	if arg == "" {
+		m.openModelPopup()
+		m.refreshContent()
+		return m, nil
+	}
+	if arg == "auto" {
+		return m.applyModelChoice("")
+	}
+	if _, ok := m.catalog.Get(arg); !ok {
+		m.blocks = append(m.blocks, errorBox("unknown model "+arg+" — not in catalog"))
+		m.refreshContent()
+		return m, nil
+	}
+	return m.applyModelChoice(arg)
+}
+
+func (m Model) applyModelChoice(name string) (tea.Model, tea.Cmd) {
+	previous := m.cfg.Model
+	m.cfg.Model = name
+	if err := m.cfg.Save(); err != nil {
+		m.cfg.Model = previous
+		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
+		m.refreshContent()
+		return m, nil
+	}
+	m.agent.SetPinned(name)
+	m.rebuildAgent()
+	if name == "" {
+		m.blocks = append(m.blocks, resultStyle.Render("model auto — Jev decides again"))
+	} else {
+		m.blocks = append(m.blocks, primaryStyle.Render("model pinned: "+name))
+	}
+	m.blocks = append(m.blocks, resultStyle.Render("config saved"))
+	m.refreshContent()
+	return m, nil
+}
+
+func (m Model) selectModel() (tea.Model, tea.Cmd) {
+	if !m.modelOpen {
+		return m, nil
+	}
+	choices := m.modelChoices()
+	if m.modelSelected >= len(choices) {
+		return m, nil
+	}
+	name := choices[m.modelSelected].model
+	m.closeModelPopup()
+	return m.applyModelChoice(name)
+}
+
+func (m Model) modelPopupView() string {
+	if !m.modelOpen {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(chromeLabelStyle.Render("MODEL"))
+	b.WriteString("\n")
+	for i, choice := range m.modelChoices() {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if i == m.modelSelected {
+			b.WriteString(mentionSelectedStyle.Render("▸ " + choice.label))
+		} else {
+			b.WriteString(mentionItemStyle.Render("  " + choice.label))
+		}
+	}
+	return mentionPopupStyle.Render(b.String())
+}
+
+func (m Model) handleJevCommand(arg string) (tea.Model, tea.Cmd) {
+	switch arg {
+	case "":
+		return m.showJevStatus()
+	case "on":
+		return m.enableJev()
+	case "off":
+		return m.applyJevState(false)
+	default:
+		m.blocks = append(m.blocks, errorBox("unknown jev state "+arg+" — /jev on or /jev off"))
+		m.refreshContent()
+		return m, nil
+	}
+}
+
+func (m Model) showJevStatus() (tea.Model, tea.Cmd) {
+	state := "off"
+	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
+		state = "on"
+	}
+	model := m.cfg.Model
+	if model == "" {
+		model = m.catalog.DefaultModel
+	}
+	m.blocks = append(m.blocks, resultStyle.Render("jev: "+state+"\nmodel: "+model))
+	m.refreshContent()
+	return m, nil
+}
+
+func (m Model) enableJev() (tea.Model, tea.Cmd) {
+	if m.cfg.Typesafe.APIKey == "" {
+		m.blocks = append(m.blocks, errorBox("jev needs a typesafe api key — set one in /config"))
+		m.refreshContent()
+		return m, nil
+	}
+	return m.applyJevState(true)
+}
+
+func (m Model) applyJevState(enabled bool) (tea.Model, tea.Cmd) {
+	previous := m.cfg.Typesafe.Enabled
+	m.cfg.Typesafe.Enabled = &enabled
+	if err := m.cfg.Save(); err != nil {
+		m.cfg.Typesafe.Enabled = previous
+		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
+		m.refreshContent()
+		return m, nil
+	}
+	m.rebuildAgent()
+	label := "jev off"
+	if enabled {
+		label = "jev on"
+	}
+	m.blocks = append(m.blocks, primaryStyle.Render(label))
+	m.blocks = append(m.blocks, resultStyle.Render("config saved"))
+	if !enabled {
+		m.openModelPopup()
+	}
+	m.refreshContent()
+	return m, nil
+}
+
 func (m Model) handleKspecCommand(cmdline string) (tea.Model, tea.Cmd) {
 	cmd := strings.Fields(cmdline)[0]
 	if cmd == "/kspec-version" {
 		return m.showKspecVersion()
 	}
 	if m.kspecStore == nil {
-		m.blocks = append(m.blocks, errorBoxStyle.Render("kspec is not available in this session"))
+		m.blocks = append(m.blocks, errorBox("kspec is not available in this session"))
 		m.refreshContent()
 		return m, nil
 	}
@@ -186,12 +358,12 @@ func (m Model) handleKspecCommand(cmdline string) (tea.Model, tea.Cmd) {
 	}
 	name := strings.TrimPrefix(cmd, "/")
 	if !kspecSkillListed(m.kspecStore, name) {
-		m.blocks = append(m.blocks, errorBoxStyle.Render("unknown skill "+name+" — /help"))
+		m.blocks = append(m.blocks, errorBox("unknown skill "+name+" — /help"))
 		m.refreshContent()
 		return m, nil
 	}
 	if err := m.agent.ActivateSkill(name); err != nil {
-		m.blocks = append(m.blocks, errorBoxStyle.Render(err.Error()))
+		m.blocks = append(m.blocks, errorBox(err.Error()))
 		m.refreshContent()
 		return m, nil
 	}
@@ -227,7 +399,7 @@ func kspecSkillListed(store *kspec.Store, name string) bool {
 
 func (m Model) showKspecVersion() (tea.Model, tea.Cmd) {
 	if m.kspecStore == nil {
-		m.blocks = append(m.blocks, errorBoxStyle.Render("kspec is not available in this session"))
+		m.blocks = append(m.blocks, errorBox("kspec is not available in this session"))
 		m.refreshContent()
 		return m, nil
 	}

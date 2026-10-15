@@ -50,8 +50,16 @@ func main() {
 	squadStore := squad.Load()
 
 	if *doctor {
-		runDoctor(cfg, cat, store, kspecStore)
+		code := runDoctor(cfg, cat, store, kspecStore, jev.DefaultBaseURL)
+		if code != 0 {
+			os.Exit(code)
+		}
 		return
+	}
+
+	if err := validateModel(cfg.Model, cat); err != nil {
+		fmt.Fprintln(os.Stderr, "kterminal:", err)
+		os.Exit(1)
 	}
 
 	defer store.Close()
@@ -79,20 +87,13 @@ func main() {
 			MaxRetries:       cfg.LLM.MaxRetries,
 		})
 	}
-	var jevRouter, fallback router.Router
-	if cfg.Typesafe.APIKey != "" {
-		jevRouter = router.NewJev(jev.New(cfg.Typesafe.APIKey))
-	}
-	fallback = &router.HeuristicRouter{Default: cat.DefaultModel}
-	if jevRouter == nil {
-		jevRouter = fallback
-		fallback = nil
-	}
+	primary, fallback := router.Wire(cfg.Typesafe.APIKey, cfg.Typesafe.JevEnabled(), cfg.Model, cat)
 
 	reg := tools.NewRegistry()
 	reg.SetOnGoEdit(tools.GoVetHook)
 
-	ag := agent.New(llmClient, jevRouter, fallback, cat, reg, sess, *confirm)
+	ag := agent.New(llmClient, primary, fallback, cat, reg, sess, *confirm)
+	ag.SetPinned(cfg.Model)
 	ag.Telemetry = store
 	ag.AttachKspec(kspecStore)
 	ag.AttachSquad(squadStore)
@@ -178,7 +179,7 @@ func telemetryPath() string {
 	return filepath.Join(home, ".local", "share", "kterminal", "telemetry.json")
 }
 
-func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store, kspecStore *kspec.Store) {
+func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store, kspecStore *kspec.Store, jevBaseURL string) int {
 	ok := true
 	fmt.Println("kterminal doctor")
 	fmt.Println()
@@ -194,6 +195,7 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	fmt.Printf("  skip tls verify: %v\n", cfg.LLM.SkipTLSVerify)
 	fmt.Print(doctorLimitsLines(cfg))
 	fmt.Printf("  typesafe api key: %s\n", display(cfg.Typesafe.APIKey))
+	fmt.Print(doctorRoutingLines(cfg))
 	fmt.Println()
 
 	fmt.Printf("catalog: %d models, default %s\n", len(cat.Models), cat.DefaultModel)
@@ -235,22 +237,10 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	}
 	fmt.Println()
 
-	if cfg.Typesafe.APIKey == "" {
-		fmt.Println("jev: NOT CONFIGURED — routing falls back to heuristics")
-	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		client := jev.New(cfg.Typesafe.APIKey)
-		_, conf, _, err := client.Decide(ctx, "Health check for a terminal coding assistant.", "Which team owns this?", map[string]string{
-			"dev":   "Development topics",
-			"sales": "Pricing questions",
-		})
-		cancel()
-		if err != nil {
-			fmt.Printf("jev: UNREACHABLE — %v\n", err)
-			ok = false
-		} else {
-			fmt.Printf("jev: reachable (answered with confidence %.2f)\n", conf)
-		}
+	section, jevOK := doctorJevSection(cfg, jevBaseURL)
+	fmt.Print(section)
+	if !jevOK {
+		ok = false
 	}
 
 	fmt.Println()
@@ -260,9 +250,61 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	fmt.Print(doctorTelemetryTable(store, cat))
 
 	if !ok {
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println("all checks passed")
+	return 0
+}
+
+func validateModel(model string, cat *catalog.Catalog) error {
+	if model == "" {
+		return nil
+	}
+	if _, ok := cat.Get(model); !ok {
+		return fmt.Errorf("unknown model %q: not in the catalog", model)
+	}
+	return nil
+}
+
+func doctorRoutingLines(cfg *config.Config) string {
+	var b strings.Builder
+	enabled := "no"
+	if cfg.Typesafe.JevEnabled() {
+		enabled = "yes"
+	}
+	fmt.Fprintf(&b, "  jev enabled: %s\n", enabled)
+	model := cfg.Model
+	if model == "" {
+		model = "auto"
+	}
+	fmt.Fprintf(&b, "  model: %s\n", model)
+	return b.String()
+}
+
+func doctorJevSection(cfg *config.Config, baseURL string) (string, bool) {
+	var b strings.Builder
+	if !cfg.Typesafe.JevEnabled() {
+		fmt.Fprintln(&b, "jev: disabled")
+		return b.String(), true
+	}
+	if cfg.Typesafe.APIKey == "" {
+		fmt.Fprintln(&b, "jev: NOT CONFIGURED — routing falls back to heuristics")
+		return b.String(), true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	client := jev.New(cfg.Typesafe.APIKey)
+	client.BaseURL = baseURL
+	_, conf, _, err := client.Decide(ctx, "Health check for a terminal coding assistant.", "Which team owns this?", map[string]string{
+		"dev":   "Development topics",
+		"sales": "Pricing questions",
+	})
+	cancel()
+	if err != nil {
+		fmt.Fprintf(&b, "jev: UNREACHABLE — %v\n", err)
+		return b.String(), false
+	}
+	fmt.Fprintf(&b, "jev: reachable (answered with confidence %.2f)\n", conf)
+	return b.String(), true
 }
 
 func doctorLimitsLines(cfg *config.Config) string {

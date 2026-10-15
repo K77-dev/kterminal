@@ -3,10 +3,13 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +19,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/router"
 	"kterminal/internal/tools"
 )
 
@@ -440,7 +444,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected command popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -519,7 +523,7 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -825,7 +829,7 @@ func TestKspecCommandSendsPendingAttachments(t *testing.T) {
 		t.Fatalf("kickoff must send text + image parts:\n%s", body)
 	}
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, "🖼 shot.png ×") {
+	if !strings.Contains(plain, "▣ shot.png ×") {
 		t.Fatalf("user block missing the attachment chip:\n%s", plain)
 	}
 }
@@ -847,5 +851,903 @@ func TestKspecHelpLineTruncatesByRunes(t *testing.T) {
 	short := kspecHelpLine(kspec.Skill{Name: "kspec-a", Description: "do thing"})
 	if short != "/kspec-a — do thing" {
 		t.Fatalf("short line must not truncate: %q", short)
+	}
+}
+
+func newModelCommandModel(t *testing.T) (Model, *agent.Agent) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("KTERMINAL_MODEL", "")
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	cfg := &config.Config{}
+	cfg.LLM.BaseURL = "http://localhost:4000"
+	cfg.LLM.APIKey = "gw-key"
+	ag := agent.New(nil, nil, nil, cat, tools.NewRegistry(), nil, false)
+	return New(ag, cfg, cat, true), ag
+}
+
+func seedPinnedConfig(t *testing.T, m Model, ag *agent.Agent, name string) {
+	t.Helper()
+	m.cfg.Model = name
+	if err := m.cfg.Save(); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	ag.SetPinned(name)
+}
+
+func pickerIndexOf(m Model, name string) int {
+	for i, choice := range m.modelChoices() {
+		if choice.model == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestModelCommandPersistsPinAndRewires(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model glm-5.3")
+
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("pinned = %q, want glm-5.3", got)
+	}
+	if m.cfg.Model != "glm-5.3" {
+		t.Fatalf("cfg.Model = %q, want glm-5.3", m.cfg.Model)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Model != "glm-5.3" {
+		t.Fatalf("reloaded model = %q, want glm-5.3 (must survive restart)", reloaded.Model)
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter without a typesafe key", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with the fixed router", ag.Fallback)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "model pinned: glm-5.3") {
+		t.Fatalf("chat missing the pin confirmation:\n%s", plain)
+	}
+	if !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the save confirmation:\n%s", plain)
+	}
+}
+
+func TestModelCommandKeepsJevRoutingWithPin(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	m.cfg.Typesafe.APIKey = "jev-key"
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model glm-5.3")
+
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("pinned = %q, want glm-5.3 (fixed model wins with Jev on)", got)
+	}
+	if _, ok := ag.Router.(*router.JevRouter); !ok {
+		t.Fatalf("router = %T, want *router.JevRouter with Jev enabled", ag.Router)
+	}
+	if _, ok := ag.Fallback.(*router.HeuristicRouter); !ok {
+		t.Fatalf("fallback = %T, want *router.HeuristicRouter with Jev enabled", ag.Fallback)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Model != "glm-5.3" {
+		t.Fatalf("reloaded model = %q, want glm-5.3", reloaded.Model)
+	}
+}
+
+func TestModelCommandUnknownModelKeepsConfig(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model nope-model")
+
+	if got := ag.Pinned(); got != "" {
+		t.Fatalf("unknown model must not pin, got %q", got)
+	}
+	if m.cfg.Model != "" {
+		t.Fatalf("unknown model must not touch cfg.Model, got %q", m.cfg.Model)
+	}
+	if _, err := os.Stat(config.Path()); err == nil {
+		t.Fatal("unknown model must not persist the config file")
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "unknown model nope-model — not in catalog") {
+		t.Fatalf("chat missing the error box:\n%s", plain)
+	}
+	if strings.Contains(plain, "model pinned") || strings.Contains(plain, "config saved") {
+		t.Fatalf("unknown model must not confirm anything:\n%s", plain)
+	}
+}
+
+func TestModelAutoClearsPersistedModel(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	seedPinnedConfig(t, m, ag, "glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model auto")
+
+	if got := ag.Pinned(); got != "" {
+		t.Fatalf("pinned = %q, want empty after auto", got)
+	}
+	if m.cfg.Model != "" {
+		t.Fatalf("cfg.Model = %q, want empty after auto", m.cfg.Model)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Model != "" {
+		t.Fatalf("reloaded model = %q, want empty (auto clears the field)", reloaded.Model)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "model auto") || !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the auto confirmation:\n%s", plain)
+	}
+}
+
+func TestModelCommandWithoutArgsOpensPicker(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	ag.SetPinned("glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model")
+
+	if !m.modelOpen {
+		t.Fatal("/model without args must open the picker")
+	}
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("opening the picker must not remove the pin, got %q", got)
+	}
+	choices := m.modelChoices()
+	if len(choices) != len(m.catalog.Models)+1 {
+		t.Fatalf("choices = %d, want %d (auto + catalog)", len(choices), len(m.catalog.Models)+1)
+	}
+	if choices[0].model != "" || choices[0].label != "auto" {
+		t.Fatalf("first choice = %+v, want the auto entry", choices[0])
+	}
+	for i, mm := range m.catalog.Models {
+		if choices[i+1].model != mm.Name {
+			t.Fatalf("choice %d = %q, want catalog model %q", i+1, choices[i+1].model, mm.Name)
+		}
+	}
+	if !strings.Contains(choices[1].label, "$") || !strings.Contains(choices[1].label, "tok/s") {
+		t.Fatalf("choice label missing the price/speed summary: %q", choices[1].label)
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "MODEL") {
+		t.Fatalf("view missing the picker header:\n%s", view)
+	}
+	if !strings.Contains(view, "glm-5.2 · $1.00/$4.00 · ~70 tok/s") {
+		t.Fatalf("view missing the model summary line:\n%s", view)
+	}
+	if _, err := os.Stat(config.Path()); err == nil {
+		t.Fatal("opening the picker must not persist the config file")
+	}
+}
+
+func TestModelPickerPreSelectsPinnedModel(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	ag.SetPinned("glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model")
+
+	want := pickerIndexOf(m, "glm-5.3")
+	if want < 0 {
+		t.Fatal("glm-5.3 missing from the picker choices")
+	}
+	if m.modelSelected != want {
+		t.Fatalf("selected = %d, want %d (pin glm-5.3 pre-selected)", m.modelSelected, want)
+	}
+	if !strings.Contains(stripANSI(m.View()), "▸ glm-5.3") {
+		t.Fatalf("view missing the pre-selected pin marker:\n%s", stripANSI(m.View()))
+	}
+
+	m2, _ := newModelCommandModel(t)
+	m2 = step(t, m2, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m2 = runCommand(t, m2, "/model")
+	if m2.modelSelected != 0 {
+		t.Fatalf("selected = %d, want 0 (auto) without a pin", m2.modelSelected)
+	}
+}
+
+func TestModelPickerEscKeepsConfig(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	seedPinnedConfig(t, m, ag, "glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model")
+	if !m.modelOpen {
+		t.Fatal("expected picker open before esc")
+	}
+	before, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.modelOpen {
+		t.Fatal("esc must close the picker")
+	}
+	if m.modelSelected != 0 {
+		t.Fatalf("selection must reset after esc, got %d", m.modelSelected)
+	}
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("esc must keep the pin, got %q", got)
+	}
+	after, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read config after esc: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("esc must not rewrite the config file:\nbefore: %q\nafter:  %q", string(before), string(after))
+	}
+}
+
+func TestModelPickerEnterPersistsSelection(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	seedPinnedConfig(t, m, ag, "glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model")
+	start := m.modelSelected
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	moved := m.modelSelected
+	if moved == start {
+		t.Fatal("down must move the selection before enter")
+	}
+	want := m.modelChoices()[moved].model
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.modelOpen {
+		t.Fatal("enter must close the picker")
+	}
+	if got := ag.Pinned(); got != want {
+		t.Fatalf("pinned = %q, want %q from the picker selection", got, want)
+	}
+	if m.cfg.Model != want {
+		t.Fatalf("cfg.Model = %q, want %q", m.cfg.Model, want)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Model != want {
+		t.Fatalf("reloaded model = %q, want %q (selection must survive restart)", reloaded.Model, want)
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter re-wired after the selection", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with the fixed router", ag.Fallback)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "model pinned: "+want) || !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the selection confirmation:\n%s", plain)
+	}
+}
+
+func TestModelPickerEnterOnAutoClearsModel(t *testing.T) {
+	m, ag := newModelCommandModel(t)
+	seedPinnedConfig(t, m, ag, "glm-5.3")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/model")
+	start := m.modelSelected
+	for range start {
+		m = step(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	}
+	if m.modelSelected != 0 {
+		t.Fatalf("navigating up from the pre-selected pin must reach auto, got %d", m.modelSelected)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := ag.Pinned(); got != "" {
+		t.Fatalf("pinned = %q, want empty after choosing auto", got)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Model != "" {
+		t.Fatalf("reloaded model = %q, want empty after choosing auto", reloaded.Model)
+	}
+}
+
+func newJevCommandModel(t *testing.T, gwURL, jevURL, jevKey string) (Model, *agent.Agent) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("KTERMINAL_MODEL", "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	cfg := &config.Config{}
+	cfg.LLM.BaseURL = gwURL
+	cfg.LLM.APIKey = "gw-key"
+	cfg.Typesafe.APIKey = jevKey
+	primary, fallback := router.Wire(jevKey, cfg.Typesafe.JevEnabled(), cfg.Model, cat)
+	if jr, ok := primary.(*router.JevRouter); ok {
+		jr.Client.BaseURL = jevURL
+	}
+	ag := agent.New(llm.New(gwURL, "gw-key", false), primary, fallback, cat, tools.NewRegistry(), nil, false)
+	return New(ag, cfg, cat, true), ag
+}
+
+func countingJev(t *testing.T, choice string, hits *atomic.Int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/systemone", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		json.NewEncoder(w).Encode(map[string]any{
+			"model": "jev-test",
+			"answers": map[string]any{
+				"model_choice": map[string]any{
+					"type":          "choice",
+					"choice":        choice,
+					"confidence":    0.9,
+					"probabilities": map[string]float64{choice: 0.9},
+				},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestJevOnWithoutAPIKeyKeepsConfig(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if err := m.cfg.Save(); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	before, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	routerBefore := ag.Router
+
+	m = runCommand(t, m, "/jev on")
+
+	after, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read config after /jev on: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("config file must stay unchanged:\nbefore: %q\nafter:  %q", string(before), string(after))
+	}
+	if ag.Router != routerBefore {
+		t.Fatalf("router must stay %T, got %T", routerBefore, ag.Router)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "jev needs a typesafe api key") {
+		t.Fatalf("chat missing the api key error:\n%s", plain)
+	}
+	if strings.Contains(plain, "config saved") || strings.Contains(plain, "jev on") {
+		t.Fatalf("chat must not confirm anything:\n%s", plain)
+	}
+}
+
+func TestJevOffPersistsAndOpensPicker(t *testing.T) {
+	gw, _ := captureGateway(t)
+	var hits atomic.Int32
+	jevSrv := countingJev(t, "glm-5.2", &hits)
+	m, ag := newJevCommandModel(t, gw.URL, jevSrv.URL, "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev off")
+
+	if !m.modelOpen {
+		t.Fatal("/jev off must open the model picker")
+	}
+	if m.cfg.Typesafe.JevEnabled() {
+		t.Fatal("enabled must be false in memory after /jev off")
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter after /jev off", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with the fixed router", ag.Fallback)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled = false must survive a restart")
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "jev off") || !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the off confirmation:\n%s", plain)
+	}
+}
+
+func TestJevOffStopsJevRequestsInNextTurn(t *testing.T) {
+	gw, _ := captureGateway(t)
+	var hits atomic.Int32
+	jevSrv := countingJev(t, "glm-5.2", &hits)
+	m, ag := newJevCommandModel(t, gw.URL, jevSrv.URL, "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.input.SetValue("first question")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	route := waitForAgentEvent(t, ag.Events, agent.EventRoute)
+	if route.Router != "jev" {
+		t.Fatalf("first turn must route via jev, got %q", route.Router)
+	}
+	done := waitForAgentEvent(t, ag.Events, agent.EventTurnDone)
+	m = step(t, m, agentEventMsg{event: done})
+	hitsAfterFirst := hits.Load()
+	if hitsAfterFirst == 0 {
+		t.Fatal("precondition: the jev mock must have been called at least once")
+	}
+
+	m = runCommand(t, m, "/jev off")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.modelOpen {
+		t.Fatal("esc must close the picker opened by /jev off")
+	}
+
+	m.input.SetValue("second question")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	route = waitForAgentEvent(t, ag.Events, agent.EventRoute)
+	if route.Router != "fixed" {
+		t.Fatalf("turn after /jev off must route via fixed, got %q", route.Router)
+	}
+	if route.Model != m.catalog.DefaultModel {
+		t.Fatalf("model = %q, want the catalog default %q (esc keeps auto)", route.Model, m.catalog.DefaultModel)
+	}
+	done = waitForAgentEvent(t, ag.Events, agent.EventTurnDone)
+	m = step(t, m, agentEventMsg{event: done})
+	if got := hits.Load(); got != hitsAfterFirst {
+		t.Fatalf("jev mock hits = %d, want %d (no requests after /jev off)", got, hitsAfterFirst)
+	}
+}
+
+func TestJevOffThenModelCommandPersistsBothFields(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev off")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = runCommand(t, m, "/model glm-5.3")
+
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled = false must survive /jev off followed by /model")
+	}
+	if reloaded.Model != "glm-5.3" {
+		t.Fatalf("reloaded model = %q, want glm-5.3 (both fields must survive a restart)", reloaded.Model)
+	}
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("pinned = %q, want glm-5.3", got)
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter after /jev off + /model", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with Jev disabled", ag.Fallback)
+	}
+}
+
+func TestJevOnReinstallsJevRouter(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev off")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("precondition: router = %T, want *router.FixedRouter after /jev off", ag.Router)
+	}
+
+	m = runCommand(t, m, "/jev on")
+
+	if _, ok := ag.Router.(*router.JevRouter); !ok {
+		t.Fatalf("router = %T, want *router.JevRouter reinstalled by /jev on", ag.Router)
+	}
+	if _, ok := ag.Fallback.(*router.HeuristicRouter); !ok {
+		t.Fatalf("fallback = %T, want *router.HeuristicRouter with Jev on", ag.Fallback)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled = true must be persisted by /jev on")
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "jev on") || !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the on confirmation:\n%s", plain)
+	}
+}
+
+func TestJevOffIdempotent(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev off")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = runCommand(t, m, "/jev off")
+
+	if !m.modelOpen {
+		t.Fatal("second /jev off must open the picker again")
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter after the second /jev off", ag.Router)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled must stay false after the second /jev off")
+	}
+	plain := stripANSI(m.contentRaw)
+	if strings.Contains(plain, "failed to save config") {
+		t.Fatalf("idempotent /jev off must not error:\n%s", plain)
+	}
+	if !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the save confirmation:\n%s", plain)
+	}
+}
+
+func TestJevStatusShowsStateAndModel(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev")
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "jev: on") {
+		t.Fatalf("status must show jev on with a key:\n%s", plain)
+	}
+	if !strings.Contains(plain, "model: "+m.catalog.DefaultModel) {
+		t.Fatalf("status must show the catalog default as the fixed model:\n%s", plain)
+	}
+
+	m = runCommand(t, m, "/model glm-5.3")
+	m = runCommand(t, m, "/jev")
+	plain = stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "model: glm-5.3") {
+		t.Fatalf("status must show the configured fixed model:\n%s", plain)
+	}
+
+	m = runCommand(t, m, "/jev off")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = runCommand(t, m, "/jev")
+	plain = stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "jev: off") {
+		t.Fatalf("status must show jev off after /jev off:\n%s", plain)
+	}
+
+	m2, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "")
+	m2 = step(t, m2, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m2 = runCommand(t, m2, "/jev")
+	if plain := stripANSI(m2.contentRaw); !strings.Contains(plain, "jev: off") {
+		t.Fatalf("status must show jev off without an api key:\n%s", plain)
+	}
+}
+
+func TestJevUnknownStateErrors(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/jev toggle")
+
+	if _, err := os.Stat(config.Path()); err == nil {
+		t.Fatal("unknown state must not persist the config file")
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "unknown jev state toggle") {
+		t.Fatalf("chat missing the unknown state error:\n%s", plain)
+	}
+}
+
+func newConfigScreenModel(t *testing.T) (Model, *agent.Agent) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("KTERMINAL_MODEL", "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	t.Setenv("TYPESAFE_API_KEY", "")
+	t.Setenv("KTERMINAL_LLM_BASE_URL", "")
+	t.Setenv("KTERMINAL_LLM_API_KEY", "")
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	cfg := &config.Config{}
+	cfg.LLM.BaseURL = "http://localhost:4000"
+	cfg.LLM.APIKey = "gw-key"
+	cfg.Typesafe.APIKey = "jev-key"
+	ag := agent.New(llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, false), nil, nil, cat, tools.NewRegistry(), nil, false)
+	return New(ag, cfg, cat, true), ag
+}
+
+func TestConfigInvalidModelKeepsScreenAndFile(t *testing.T) {
+	m, ag := newConfigScreenModel(t)
+	if err := m.cfg.Save(); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	before, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	enabledBefore := m.cfg.Typesafe.Enabled
+
+	m = runCommand(t, m, "/config")
+	if m.state != stateConfig {
+		t.Fatalf("state = %q, want config", m.state)
+	}
+	if len(m.cfgInputs) != 6 {
+		t.Fatalf("inputs = %d, want 6", len(m.cfgInputs))
+	}
+	if got := m.cfgInputs[4].Value(); got != "yes" {
+		t.Fatalf("jev enabled input = %q, want yes (default)", got)
+	}
+	m.cfgInputs[5].SetValue("nope-model")
+	for range len(m.cfgInputs) {
+		m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	if m.state != stateConfig {
+		t.Fatalf("state = %q, want config (invalid model must keep the screen)", m.state)
+	}
+	after, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read config after failed save: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("config file must stay unchanged:\nbefore: %q\nafter:  %q", string(before), string(after))
+	}
+	if m.cfg.Model != "" {
+		t.Fatalf("cfg.Model = %q, want empty (invalid model must not leak into memory)", m.cfg.Model)
+	}
+	if m.cfg.Typesafe.Enabled != enabledBefore {
+		t.Fatalf("invalid model must not mutate enabled, got %+v", m.cfg.Typesafe.Enabled)
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "unknown model nope-model — not in catalog") {
+		t.Fatalf("config view missing the error box:\n%s", view)
+	}
+	if got := ag.Pinned(); got != "" {
+		t.Fatalf("pinned = %q, want empty (no re-wiring on invalid model)", got)
+	}
+
+	m.cfgInputs[5].SetValue("glm-5.3")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after fixing the model", m.state)
+	}
+	if strings.Contains(stripANSI(m.View()), "unknown model") {
+		t.Fatal("error must clear after a successful save")
+	}
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("pinned = %q, want glm-5.3 after the recovery save", got)
+	}
+}
+
+func TestConfigSavePersistsJevAndModel(t *testing.T) {
+	m, ag := newConfigScreenModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/config")
+	m.cfgInputs[4].SetValue("no")
+	m.cfgInputs[5].SetValue("glm-5.3")
+	for range len(m.cfgInputs) {
+		m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after save", m.state)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled must be false after saving no")
+	}
+	if reloaded.Model != "glm-5.3" {
+		t.Fatalf("reloaded model = %q, want glm-5.3", reloaded.Model)
+	}
+	if reloaded.LLM.BaseURL != "http://localhost:4000" || reloaded.LLM.APIKey != "gw-key" {
+		t.Fatalf("existing llm fields broken: %+v", reloaded.LLM)
+	}
+	if reloaded.Typesafe.APIKey != "jev-key" {
+		t.Fatalf("typesafe api key = %q, want jev-key", reloaded.Typesafe.APIKey)
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router = %T, want *router.FixedRouter after saving with jev disabled", ag.Router)
+	}
+	if ag.Fallback != nil {
+		t.Fatalf("fallback = %T, want nil with the fixed router", ag.Fallback)
+	}
+	if got := ag.Pinned(); got != "glm-5.3" {
+		t.Fatalf("pinned = %q, want glm-5.3 (rebuildAgent applies the pin)", got)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the save confirmation:\n%s", plain)
+	}
+}
+
+func TestConfigSaveMaterializesLegacyFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("KTERMINAL_MODEL", "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	t.Setenv("TYPESAFE_API_KEY", "")
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	legacy := "[llm]\nbase_url = \"http://localhost:4000\"\napi_key = \"gw-key\"\n\n[typesafe]\napi_key = \"jev-key\"\n"
+	if err := os.WriteFile(config.Path(), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	if cfg.Typesafe.Enabled != nil || cfg.Model != "" {
+		t.Fatalf("legacy config must load without the new fields: %+v", cfg)
+	}
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ag := agent.New(llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, false), nil, nil, cat, tools.NewRegistry(), nil, false)
+	m := New(ag, cfg, cat, true)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/config")
+	if got := m.cfgInputs[4].Value(); got != "yes" {
+		t.Fatalf("jev enabled input = %q, want yes (nil enabled defaults to true)", got)
+	}
+	if got := m.cfgInputs[5].Value(); got != "" {
+		t.Fatalf("model input = %q, want empty for a legacy config", got)
+	}
+	for range len(m.cfgInputs) {
+		m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	if m.state != stateChat {
+		t.Fatalf("state = %q, want chat after save", m.state)
+	}
+	raw, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if !strings.Contains(string(raw), "enabled = true") {
+		t.Fatalf("saved config must materialize enabled = true:\n%s", string(raw))
+	}
+	if !strings.Contains(string(raw), "model = \"\"") {
+		t.Fatalf("saved config must materialize the model field:\n%s", string(raw))
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !reloaded.Typesafe.JevEnabled() {
+		t.Fatal("enabled must stay true after materialization")
+	}
+	if reloaded.Model != "" {
+		t.Fatalf("model = %q, want empty", reloaded.Model)
+	}
+	if reloaded.LLM.BaseURL != "http://localhost:4000" || reloaded.LLM.APIKey != "gw-key" {
+		t.Fatalf("legacy llm fields broken: %+v", reloaded.LLM)
+	}
+	if reloaded.Typesafe.APIKey != "jev-key" {
+		t.Fatalf("legacy typesafe key broken: %q", reloaded.Typesafe.APIKey)
+	}
+}
+
+func TestLegacyConfigKeepsJevActiveEndToEnd(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("KTERMINAL_MODEL", "")
+	t.Setenv("KTERMINAL_TYPESAFE_ENABLED", "")
+	t.Setenv("TYPESAFE_API_KEY", "")
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	legacy := "[llm]\nbase_url = \"http://localhost:4000\"\napi_key = \"gw-key\"\n\n[typesafe]\napi_key = \"jev-key\"\n"
+	if err := os.WriteFile(config.Path(), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	if !cfg.Typesafe.JevEnabled() {
+		t.Fatal("legacy config without enabled must keep Jev on")
+	}
+	if cfg.Model != "" {
+		t.Fatalf("legacy model = %q, want empty", cfg.Model)
+	}
+
+	gw, _ := captureGateway(t)
+	var hits atomic.Int32
+	jevSrv := countingJev(t, "glm-5.2", &hits)
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	primary, fallback := router.Wire(cfg.Typesafe.APIKey, cfg.Typesafe.JevEnabled(), cfg.Model, cat)
+	jr, ok := primary.(*router.JevRouter)
+	if !ok {
+		t.Fatalf("primary = %T, want *router.JevRouter for a legacy config with an api key", primary)
+	}
+	jr.Client.BaseURL = jevSrv.URL
+	if _, ok := fallback.(*router.HeuristicRouter); !ok {
+		t.Fatalf("fallback = %T, want *router.HeuristicRouter with Jev active", fallback)
+	}
+
+	ag := agent.New(llm.New(gw.URL, "gw-key", false), primary, fallback, cat, tools.NewRegistry(), nil, false)
+	m := New(ag, cfg, cat, true)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.input.SetValue("hello")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	route := waitForAgentEvent(t, ag.Events, agent.EventRoute)
+	if route.Router != "jev" {
+		t.Fatalf("route router = %q, want jev — legacy config must keep the current behavior", route.Router)
+	}
+	if route.Model != "glm-5.2" {
+		t.Fatalf("route model = %q, want the jev choice glm-5.2", route.Model)
+	}
+	done := waitForAgentEvent(t, ag.Events, agent.EventTurnDone)
+	m = step(t, m, agentEventMsg{event: done})
+	if hits.Load() == 0 {
+		t.Fatal("jev mock must receive the routing request for a legacy config with an api key")
+	}
+}
+
+func TestHelpDocumentsJevAndPersistentModel(t *testing.T) {
+	m := newTestModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = runCommand(t, m, "/help")
+
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "/jev on|off — toggle Jev routing") {
+		t.Fatalf("help missing the /jev line:\n%s", plain)
+	}
+	if !strings.Contains(plain, "persisted across restarts") {
+		t.Fatalf("help missing the persistent /model description:\n%s", plain)
+	}
+}
+
+func TestCommandPopupSuggestsJev(t *testing.T) {
+	m := newTestModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/je")})
+
+	if !m.cmdOpen {
+		t.Fatal("expected popup open for /je")
+	}
+	if strings.Join(m.cmdItems, "|") != "/jev" {
+		t.Fatalf("items = %v, want [/jev]", m.cmdItems)
 	}
 }

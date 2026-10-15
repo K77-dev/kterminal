@@ -114,3 +114,32 @@ func (r *HeuristicRouter) Route(_ context.Context, state string, candidates []ca
 	}
 	return Decision{Model: candidates[0].Name, Confidence: 0.3, Router: "heuristic", Reason: "first candidate"}, nil
 }
+
+type FixedRouter struct {
+	Model   string
+	Default string
+}
+
+func (r *FixedRouter) Route(_ context.Context, _ string, candidates []catalog.Model) (Decision, error) {
+	if len(candidates) == 0 {
+		return Decision{}, fmt.Errorf("no candidate models")
+	}
+	for _, m := range candidates {
+		if m.Name == r.Model {
+			return Decision{Model: r.Model, Confidence: 1, Router: "fixed", Reason: "fixed model"}, nil
+		}
+	}
+	for _, m := range candidates {
+		if m.Name == r.Default {
+			return Decision{Model: r.Default, Confidence: 1, Router: "fixed", Reason: "fixed: model not in candidates"}, nil
+		}
+	}
+	return Decision{Model: candidates[0].Name, Confidence: 1, Router: "fixed", Reason: "fixed: model and default not in candidates"}, nil
+}
+
+func Wire(apiKey string, jevEnabled bool, fixedModel string, cat *catalog.Catalog) (Router, Router) {
+	if jevEnabled && apiKey != "" {
+		return NewJev(jev.New(apiKey)), &HeuristicRouter{Default: cat.DefaultModel}
+	}
+	return &FixedRouter{Model: fixedModel, Default: cat.DefaultModel}, nil
+}

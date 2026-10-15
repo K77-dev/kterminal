@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"kterminal/internal/catalog"
@@ -335,5 +339,137 @@ func TestDoctorKspecSectionReportsInvalidSkills(t *testing.T) {
 	}
 	if !strings.Contains(out, "WARNING: invalid skill .agents/skills/kspec-broken:") {
 		t.Fatalf("section = %q, want the invalid skill warning", out)
+	}
+}
+
+func TestValidateModel(t *testing.T) {
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog.Load: %v", err)
+	}
+	if err := validateModel("", cat); err != nil {
+		t.Fatalf("empty model: err = %v, want nil", err)
+	}
+	if err := validateModel(cat.DefaultModel, cat); err != nil {
+		t.Fatalf("default model: err = %v, want nil", err)
+	}
+	err = validateModel("not-in-the-catalog", cat)
+	if err == nil {
+		t.Fatal("unknown model: want error")
+	}
+	if !strings.Contains(err.Error(), "not-in-the-catalog") {
+		t.Fatalf("error %q does not point at the rejected value", err)
+	}
+}
+
+func TestDoctorRoutingLines(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{Model: "glm-5.3", Typesafe: config.Typesafe{Enabled: &disabled}}
+	if out := doctorRoutingLines(cfg); out != "  jev enabled: no\n  model: glm-5.3\n" {
+		t.Fatalf("routing lines = %q, want jev disabled with fixed model", out)
+	}
+	cfg.Typesafe.Enabled = nil
+	cfg.Model = ""
+	if out := doctorRoutingLines(cfg); out != "  jev enabled: yes\n  model: auto\n" {
+		t.Fatalf("routing lines = %q, want jev enabled with auto model", out)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		done <- string(data)
+	}()
+	fn()
+	w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+func jevWitnessServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"jev-latest","answers":{"model_choice":{"type":"choice","choice":"dev","confidence":0.87,"probabilities":{"dev":0.87,"sales":0.13}}}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &requests
+}
+
+func doctorFixture(t *testing.T) (*catalog.Catalog, *telemetry.Store, *kspec.Store) {
+	t.Helper()
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog.Load: %v", err)
+	}
+	store := telemetry.New(filepath.Join(t.TempDir(), "telemetry.json"))
+	return cat, store, doctorStoreAt(t, t.TempDir())
+}
+
+func TestRunDoctorJevDisabledSkipsProbe(t *testing.T) {
+	srv, requests := jevWitnessServer(t)
+	cat, store, kspecStore := doctorFixture(t)
+	disabled := false
+	cfg := &config.Config{
+		Model:    cat.DefaultModel,
+		Typesafe: config.Typesafe{APIKey: "witness-key", Enabled: &disabled},
+	}
+
+	out := captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
+
+	if !strings.Contains(out, "jev enabled: no") {
+		t.Fatalf("output missing 'jev enabled: no':\n%s", out)
+	}
+	if !strings.Contains(out, "model: "+cat.DefaultModel) {
+		t.Fatalf("output missing 'model: %s':\n%s", cat.DefaultModel, out)
+	}
+	if !strings.Contains(out, "jev: disabled") {
+		t.Fatalf("output missing 'jev: disabled':\n%s", out)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("typesafe endpoint received %d requests, want 0", n)
+	}
+}
+
+func TestRunDoctorJevEnabledProbesEndpoint(t *testing.T) {
+	srv, requests := jevWitnessServer(t)
+	cat, store, kspecStore := doctorFixture(t)
+	enabled := true
+	cfg := &config.Config{
+		Typesafe: config.Typesafe{APIKey: "witness-key", Enabled: &enabled},
+	}
+
+	out := captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
+
+	if !strings.Contains(out, "jev enabled: yes") {
+		t.Fatalf("output missing 'jev enabled: yes':\n%s", out)
+	}
+	if !strings.Contains(out, "model: auto") {
+		t.Fatalf("output missing 'model: auto':\n%s", out)
+	}
+	if !strings.Contains(out, "jev: reachable") {
+		t.Fatalf("output missing 'jev: reachable':\n%s", out)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Fatalf("typesafe endpoint received %d requests, want 1", n)
+	}
+
+	cfg.Model = cat.DefaultModel
+	out = captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
+	if !strings.Contains(out, "model: "+cat.DefaultModel) {
+		t.Fatalf("output missing 'model: %s':\n%s", cat.DefaultModel, out)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("typesafe endpoint received %d requests, want 2", n)
 	}
 }
