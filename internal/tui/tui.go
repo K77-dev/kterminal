@@ -46,7 +46,7 @@ const minViewportRows = 3
 const chatInset = 2
 const statusIndent = 3
 const maxPromptHistory = 20
-const viewChromeRows = 4
+const viewChromeRows = 5
 const maxAttachmentBytes = 5 * 1024 * 1024
 
 var imageMimes = map[string]string{
@@ -1449,8 +1449,6 @@ func (m Model) hintBar() string {
 			verb = " subagent running"
 		}
 		left = m.spin.View() + helpStyle.Render(verb)
-	} else {
-		left = helpStyle.Render(truncate(m.cwd, maxInt(width/3, 20)))
 	}
 
 	sep := helpStyle.Render(" · ")
@@ -1562,6 +1560,8 @@ func (m Model) chatView() string {
 		b.WriteString(indentLines(chips, chatInset))
 		b.WriteString("\n")
 	}
+	b.WriteString(indentLines(cwdStyle.Render(truncate(m.cwd, maxInt(m.chatWidth()-2*chatInset-4, 1))), chatInset))
+	b.WriteString("\n")
 	b.WriteString(indentLines(m.promptDeckView(), chatInset))
 	b.WriteString("\n")
 	b.WriteString(m.hintBar())

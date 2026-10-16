@@ -143,6 +143,10 @@ var (
 	chipStyle = lipgloss.NewStyle().
 			Foreground(colAmber)
 
+	cwdStyle = lipgloss.NewStyle().
+			Foreground(colClay).
+			Padding(0, 2)
+
 	sidebarPanelStyle = lipgloss.NewStyle().
 				Border(leftBorder, false, false, false, true).
 				BorderForeground(colSeam).

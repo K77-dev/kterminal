@@ -2665,8 +2665,6 @@ func legacyHintBar(m Model) string {
 			verb = " subagent running"
 		}
 		left = m.spin.View() + helpStyle.Render(verb)
-	} else {
-		left = helpStyle.Render(truncate(m.cwd, maxInt(width/3, 20)))
 	}
 
 	sep := helpStyle.Render(" · ")
@@ -2759,6 +2757,8 @@ func legacyChatView(m Model) string {
 		b.WriteString(indentLines(chips, chatInset))
 		b.WriteString("\n")
 	}
+	b.WriteString(indentLines(cwdStyle.Render(truncate(m.cwd, maxInt(m.chatWidth()-2*chatInset-4, 1))), chatInset))
+	b.WriteString("\n")
 	b.WriteString(indentLines(legacyPromptDeck(m), chatInset))
 	b.WriteString("\n")
 	b.WriteString(legacyHintBar(m))

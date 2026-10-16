@@ -76,19 +76,20 @@ func TestMouseSelectionFlow(t *testing.T) {
 		m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventRoute, Model: "glm-5.2", Router: "jev", Confidence: 0.9}})
 	}
 
-	press := tea.MouseMsg(tea.MouseEvent{X: 0, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	selY := m.vp.Height - 1
+	press := tea.MouseMsg(tea.MouseEvent{X: 0, Y: selY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = step(t, m, press)
 	if !m.selActive {
 		t.Fatal("press should start selection")
 	}
 
-	drag := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	drag := tea.MouseMsg(tea.MouseEvent{X: 10, Y: selY, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
 	m = step(t, m, drag)
 	if !strings.Contains(m.vp.View(), "\x1b[7m") {
 		t.Fatal("drag should highlight content")
 	}
 
-	release := tea.MouseMsg(tea.MouseEvent{X: 10, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	release := tea.MouseMsg(tea.MouseEvent{X: 10, Y: selY, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
 	m = step(t, m, release)
 	if copied == "" {
 		t.Fatal("release should copy selection")
