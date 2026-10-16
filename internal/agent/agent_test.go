@@ -1444,6 +1444,58 @@ func TestCompactionPreservesLastFour(t *testing.T) {
 	}
 }
 
+func TestCompactionKeepsToolCallPairs(t *testing.T) {
+	var calls []chatCall
+	gw := compactionGateway(t,
+		[]string{"deepseek-v4.1-flash", "glm-5.2", "glm-5.3"},
+		contentChunks("dense summary of earlier work", 5, 2),
+		contentChunks("done", 30, 3),
+		&calls,
+	)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newCompactionAgent(t, gw.URL, jevSrv.URL, nil)
+	seed := []llm.Message{
+		{Role: "user", Content: strings.Repeat("a", 3000)},
+		{Role: "assistant", Content: strings.Repeat("b", 3000)},
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "assistant", Content: "thinking", ToolCalls: []llm.ToolCall{{ID: "call_9", Type: "function", Function: llm.FuncCall{Name: "bash", Arguments: `{"command":"ls"}`}}}},
+		{Role: "tool", Content: "file1\nfile2", ToolCallID: "call_9"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "q2"},
+	}
+	ag.messages = append([]llm.Message{}, seed...)
+
+	ag.Run("final question")
+	collectEvents(t, ag)
+
+	if len(calls) != 2 {
+		t.Fatalf("gateway calls = %d, want 2", len(calls))
+	}
+	if !strings.Contains(calls[0].Messages[0].Content, "q1") {
+		t.Fatalf("summary prompt missing old turn content: %q", calls[0].Messages[0].Content)
+	}
+	sent := calls[1].Messages
+	if len(sent) != 1+preservedTailMessages+1 {
+		t.Fatalf("main call sent %d messages, want %d (tail extended to keep the pair)", len(sent), preservedTailMessages+2)
+	}
+	if sent[1].Role != "assistant" || len(sent[1].ToolCalls) == 0 {
+		t.Fatalf("tail must start with the assistant tool_calls message, got %+v", sent[1])
+	}
+	for i, m := range sent {
+		if m.Role != "tool" {
+			continue
+		}
+		if !respondsToToolCall(sent[:i], m.ToolCallID) {
+			t.Fatalf("sent message %d is an orphaned tool result: %+v", i, m)
+		}
+	}
+	wantTail := append(append([]llm.Message{}, seed[4:]...), llm.Message{Role: "user", Content: "final question"})
+	if !reflect.DeepEqual(sent[1:], wantTail) {
+		t.Fatalf("sent tail = %+v, want the pair-preserving tail %+v", sent[1:], wantTail)
+	}
+}
+
 func TestCompactionUsesFallbackModel(t *testing.T) {
 	var calls []chatCall
 	gw := compactionGateway(t,
@@ -3937,6 +3989,46 @@ func TestWithSystemPromptEmptyReturnsMessages(t *testing.T) {
 	}
 }
 
+func TestWithSystemPromptDropsOrphanedToolMessages(t *testing.T) {
+	ag := &Agent{systemPrompt: "SYSTEM PROMPT"}
+	ag.messages = []llm.Message{
+		{Role: "system", Content: "dense summary"},
+		{Role: "tool", Content: "orphan", ToolCallID: "call_missing"},
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "go", ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Type: "function", Function: llm.FuncCall{Name: "bash", Arguments: `{"command":"ls"}`}},
+			{ID: "call_2", Type: "function", Function: llm.FuncCall{Name: "read", Arguments: `{"path":"x"}`}},
+		}},
+		{Role: "tool", Content: "first", ToolCallID: "call_1"},
+		{Role: "tool", Content: "second", ToolCallID: "call_2"},
+	}
+	out := ag.withSystemPrompt()
+	if len(out) != 5 {
+		t.Fatalf("withSystemPrompt = %d messages, want 5 (orphan dropped, pair kept)", len(out))
+	}
+	if out[0].Role != "system" || out[0].Content != "SYSTEM PROMPT\n\ndense summary" {
+		t.Fatalf("merged system message = %+v, want base prompt followed by the summary", out[0])
+	}
+	if out[1].Role != "user" || out[1].Content != "continue" {
+		t.Fatalf("second message = %+v, want the user message right after the orphan was dropped", out[1])
+	}
+	for i, m := range out {
+		if m.Role != "tool" {
+			continue
+		}
+		if !respondsToToolCall(out[:i], m.ToolCallID) {
+			t.Fatalf("message %d is an orphaned tool result: %+v", i, m)
+		}
+	}
+}
+
+func TestWithSystemPromptPreservesNilMessages(t *testing.T) {
+	ag := &Agent{}
+	if got := ag.withSystemPrompt(); got != nil {
+		t.Fatalf("withSystemPrompt = %+v, want nil messages", got)
+	}
+}
+
 func TestPromptCharsIncludesSystemPrompt(t *testing.T) {
 	ag := &Agent{systemPrompt: "123456"}
 	ag.messages = []llm.Message{{Role: "user", Content: "hi"}}
@@ -4397,6 +4489,25 @@ func TestActivateModeInvalid(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	if err := ag.ActivateMode("invalid"); err == nil {
 		t.Fatal("expected error for invalid mode")
+	}
+}
+
+func TestMaestroPromptForgetsSDDPipeline(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	for _, phrase := range []string{
+		"the SDD pipeline does not exist",
+		"never the completion of an artifact",
+		"problem statement for the deliberation",
+		"when the user explicitly asks",
+	} {
+		if !strings.Contains(ag.systemPrompt, phrase) {
+			t.Fatalf("maestro prompt missing SDD boundary phrase %q", phrase)
+		}
 	}
 }
 

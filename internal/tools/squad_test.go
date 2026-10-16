@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"kterminal/internal/squad"
@@ -118,9 +119,26 @@ func TestSquadKickoffToolClampsConvocationsKeepsBudget(t *testing.T) {
 
 func TestSquadKickoffToolRejectsMissingRoles(t *testing.T) {
 	store := squad.Load()
-	tool := SquadKickoffTool(store, squad.DefaultLimits(), func(k squad.Kickoff) {})
+	tool := SquadKickoffTool(store, squad.DefaultLimits(), func(squad.Kickoff) {})
 	_, err := tool.Execute(context.Background(), map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing roles")
+	}
+}
+
+func TestSquadKickoffToolExitCriterionGuardsArtifacts(t *testing.T) {
+	store := squad.Load()
+	tool := SquadKickoffTool(store, squad.DefaultLimits(), func(squad.Kickoff) {})
+	props, ok := tool.Schema.Function.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("schema properties missing")
+	}
+	prop, ok := props["exit_criterion"].(map[string]any)
+	if !ok {
+		t.Fatal("exit_criterion property missing")
+	}
+	desc, _ := prop["description"].(string)
+	if !strings.Contains(desc, "never about completing a spec artifact") {
+		t.Fatalf("exit_criterion description = %q, want the spec artifact guardrail", desc)
 	}
 }

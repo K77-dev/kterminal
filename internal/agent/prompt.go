@@ -154,15 +154,57 @@ func rulesSection(rules []kspec.Rule) string {
 }
 
 func (a *Agent) withSystemPrompt() []llm.Message {
+	var out []llm.Message
 	if a.systemPrompt == "" {
-		return a.messages
-	}
-	if len(a.messages) > 0 && a.messages[0].Role == "system" {
-		out := make([]llm.Message, 0, len(a.messages))
+		out = a.messages
+	} else if len(a.messages) > 0 && a.messages[0].Role == "system" {
+		out = make([]llm.Message, 0, len(a.messages))
 		out = append(out, llm.Message{Role: "system", Content: a.systemPrompt + "\n\n" + a.messages[0].Content})
-		return append(out, a.messages[1:]...)
+		out = append(out, a.messages[1:]...)
+	} else {
+		out = make([]llm.Message, 0, len(a.messages)+1)
+		out = append(out, llm.Message{Role: "system", Content: a.systemPrompt})
+		out = append(out, a.messages...)
 	}
-	out := make([]llm.Message, 0, len(a.messages)+1)
-	out = append(out, llm.Message{Role: "system", Content: a.systemPrompt})
-	return append(out, a.messages...)
+	return dropOrphanedToolMessages(out)
+}
+
+func dropOrphanedToolMessages(msgs []llm.Message) []llm.Message {
+	orphans := false
+	for i, m := range msgs {
+		if m.Role == "tool" && !respondsToToolCall(msgs[:i], m.ToolCallID) {
+			orphans = true
+			break
+		}
+	}
+	if !orphans {
+		return msgs
+	}
+	out := make([]llm.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "tool" && !respondsToToolCall(out, m.ToolCallID) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func respondsToToolCall(prior []llm.Message, toolCallID string) bool {
+	if toolCallID == "" {
+		return false
+	}
+	j := len(prior) - 1
+	for j >= 0 && prior[j].Role == "tool" {
+		j--
+	}
+	if j < 0 || prior[j].Role != "assistant" {
+		return false
+	}
+	for _, tc := range prior[j].ToolCalls {
+		if tc.ID == toolCallID {
+			return true
+		}
+	}
+	return false
 }

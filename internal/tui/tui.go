@@ -433,6 +433,9 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.currentModel = e.Model
 		m.refreshContent()
 	case agent.EventToolStart:
+		if md := renderMarkdown(m.stream.String(), m.mdWidth, m.dark); md != "" {
+			m.blocks = append(m.blocks, md)
+		}
 		line := indentLines(toolStyle.Render(fmt.Sprintf("▶ %s(%s)", e.Tool, firstLine(e.Args, 100))), statusIndent)
 		m.blocks = append(m.blocks, line)
 		if e.Tool == taskTool {
@@ -496,6 +499,9 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 			m.fitViewportHeight()
 		}
 		m.sentAttachments = nil
+		if md := renderMarkdown(m.stream.String(), m.mdWidth, m.dark); md != "" {
+			m.blocks = append(m.blocks, md)
+		}
 		m.blocks = append(m.blocks, errorBox(e.Text))
 		m.stream.Reset()
 		m.resetLiveBlock()

@@ -1174,7 +1174,14 @@ func (a *Agent) compact(ctx context.Context) error {
 	if len(a.messages) <= preservedTailMessages {
 		return nil
 	}
-	summaryInput := buildSummaryPrompt(a.messages[:len(a.messages)-preservedTailMessages])
+	cut := len(a.messages) - preservedTailMessages
+	for cut > 0 && a.messages[cut].Role == "tool" {
+		cut--
+	}
+	if cut == 0 {
+		return nil
+	}
+	summaryInput := buildSummaryPrompt(a.messages[:cut])
 	model := summaryModel
 	if _, ok := a.Catalog.Get(model); !ok || !a.modelAvailable(model) {
 		model = a.Catalog.DefaultModel
@@ -1187,7 +1194,7 @@ func (a *Agent) compact(ctx context.Context) error {
 		return errors.New("summary model returned empty summary")
 	}
 	before := a.estimateTokens()
-	tail := append([]llm.Message{}, a.messages[len(a.messages)-preservedTailMessages:]...)
+	tail := append([]llm.Message{}, a.messages[cut:]...)
 	a.messages = append([]llm.Message{{Role: "system", Content: res.Content}}, tail...)
 	after := a.estimateTokens()
 	a.emit(Event{Kind: EventCompaction, TokensBefore: before, TokensAfter: after})

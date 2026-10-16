@@ -28,7 +28,7 @@ func SquadKickoffTool(store *squad.Store, limits squad.Limits, register func(squ
 						},
 						"max_convocations": map[string]any{"type": "integer", "description": "Maximum number of convocations for the mesa"},
 						"token_budget":     map[string]any{"type": "integer", "description": "Advisory token budget for the entire mesa (informational only; never blocks convocations)"},
-						"exit_criterion":   map[string]any{"type": "string", "description": "Binary condition that signals convergence"},
+						"exit_criterion":   map[string]any{"type": "string", "description": "Binary condition about the converged plan that signals convergence; never about completing a spec artifact (tech spec, task list)"},
 					},
 					"required": []string{"roles"},
 				},

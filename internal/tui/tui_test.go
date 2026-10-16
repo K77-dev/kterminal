@@ -119,6 +119,47 @@ func TestToolEventsRender(t *testing.T) {
 	}
 }
 
+func TestToolStartFlushesStreamToBlock(t *testing.T) {
+	m := newTestModel(t)
+
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventDelta, Model: "glm-5.2", Text: "context before the tool call"}})
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventToolStart, Tool: "squad_kickoff", Args: `{"roles":["architect"]}`}})
+
+	plain := stripANSI(m.vp.View())
+	if !strings.Contains(plain, "context before the tool call") {
+		t.Fatalf("streamed text vanished on tool start:\n%s", plain)
+	}
+	if !strings.Contains(plain, "squad_kickoff") {
+		t.Fatalf("content missing tool call:\n%s", plain)
+	}
+	if strings.Index(plain, "context before the tool call") > strings.Index(plain, "squad_kickoff") {
+		t.Fatalf("flushed text must render above the tool line:\n%s", plain)
+	}
+	if m.stream.Len() != 0 {
+		t.Fatalf("stream not reset after tool start, len=%d", m.stream.Len())
+	}
+}
+
+func TestErrorFlushesStreamToBlock(t *testing.T) {
+	m := newTestModel(t)
+
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventDelta, Model: "glm-5.2", Text: "partial reasoning"}})
+	m = step(t, m, agentEventMsg{event: agent.Event{Kind: agent.EventError, Text: "boom"}})
+
+	plain := stripANSI(m.vp.View())
+	if !strings.Contains(plain, "partial reasoning") {
+		t.Fatalf("streamed text vanished on error:\n%s", plain)
+	}
+	if !strings.Contains(plain, "boom") {
+		t.Fatalf("content missing error box:\n%s", plain)
+	}
+	if m.stream.Len() != 0 {
+		t.Fatalf("stream not reset after error, len=%d", m.stream.Len())
+	}
+}
+
 func TestRouteLineShowsReason(t *testing.T) {
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
