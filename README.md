@@ -179,7 +179,7 @@ A mesa termina por um destes caminhos:
 
 O orçamento de tokens **não** encerra a mesa — veja [abaixo](#orçamento-e-limites).
 
-Na convergência, o maestro entrega um plano com: problema (um parágrafo), decisões de design (bullets), passos de implementação (numerados, cada um mapeando arquivo/tipo), plano de teste (tabela de casos) e riscos/mitigações. Então chama `task` **sem** persona — que cria subagentes de execução com o registry completo (`read`, `glob`, `grep`, `write`, `edit`, `bash`). A mesa delibera; os subagentes executam.
+Na convergência, o maestro entrega um plano com: problema (um parágrafo), decisões de design (bullets), passos de implementação (numerados, cada um mapeando arquivo/tipo), plano de teste (tabela de casos) e riscos/mitigações. Então chama `task` **sem** persona — que cria subagentes de execução com o registry completo (`read`, `glob`, `grep`, `write`, `edit`, `bash`). A mesa delibera; os subagentes executam — e isso é garantido mecanicamente: o toolset do maestro exclui `write`/`edit`/`bash` (fica com leitura, `ask_user`, `task` e `squad_kickoff`), então codificar direto não é uma opção nem se o modelo tentar.
 
 ### Orçamento e limites
 

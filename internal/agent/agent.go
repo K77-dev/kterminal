@@ -793,7 +793,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				a.Session.Write(session.Event{Type: "route", Model: name, Router: decision.Router, Reason: "rate limited, next best model", Depth: a.depth, Agent: a.agentName})
 			}
 			var deltas int
-			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.Tools.Definitions(), func(s string) {
+			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.toolDefinitions(), func(s string) {
 				deltas++
 				partial.WriteString(s)
 				a.emit(Event{Kind: EventDelta, Model: name, Text: s})
@@ -839,7 +839,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				a.Session.Write(session.Event{Type: "tool_call", Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, Cost: cost, Depth: a.depth, Agent: a.agentName})
 				a.emit(Event{Kind: EventToolStart, Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, SessionCost: a.sessionCost, TurnTokens: a.turnTokens})
 				approved := true
-				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) {
+				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) && !a.squadBlocksTool(tc.Function.Name) {
 					diff, _ := a.Tools.PendingDiff(ctx, tc.Function.Name, tc.Function.Arguments)
 					ch := make(chan bool, 1)
 					a.emit(Event{Kind: EventConfirm, Tool: tc.Function.Name, Args: tc.Function.Arguments, Diff: diff, ApproveCh: ch})
@@ -955,6 +955,9 @@ func modelsByProbabilityDesc(probs map[string]float64) []string {
 }
 
 func (a *Agent) executeTool(ctx context.Context, name, argsJSON string) (tools.Result, error) {
+	if a.squadBlocksTool(name) {
+		return tools.Result{}, fmt.Errorf("squad mode: the maestro never executes work itself (tool %q blocked). Deliberate via task with persona after squad_kickoff; execute the converged plan via task without persona — subagents carry the full toolset", name)
+	}
 	clock := a.now
 	if clock == nil {
 		clock = time.Now
@@ -963,6 +966,29 @@ func (a *Agent) executeTool(ctx context.Context, name, argsJSON string) (tools.R
 	res, err := a.Tools.ExecuteStream(ctx, name, argsJSON, collector.onLine)
 	collector.flush()
 	return res, err
+}
+
+func (a *Agent) maestroRestricted() bool {
+	return a.depth == 0 && a.mode == "squad"
+}
+
+func (a *Agent) squadBlocksTool(name string) bool {
+	return a.maestroRestricted() && name != taskToolName && a.Tools.IsMutating(name)
+}
+
+func (a *Agent) toolDefinitions() []llm.Tool {
+	defs := a.Tools.Definitions()
+	if !a.maestroRestricted() {
+		return defs
+	}
+	out := make([]llm.Tool, 0, len(defs))
+	for _, d := range defs {
+		if a.squadBlocksTool(d.Function.Name) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 type toolOutputCollector struct {

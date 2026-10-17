@@ -4544,6 +4544,111 @@ func TestRestoreSkillPreservesSquadPrompt(t *testing.T) {
 	}
 }
 
+func TestMaestroPromptForbidsDirectExecution(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	for _, phrase := range []string{
+		"never do the engineering work yourself",
+		"problem statement for the mesa",
+		"convene the right persona instead",
+	} {
+		if !strings.Contains(ag.systemPrompt, phrase) {
+			t.Fatalf("maestro prompt missing hard-rule phrase %q", phrase)
+		}
+	}
+}
+
+func TestSquadMaestroToolsetExcludesExecutionTools(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+	ag.AttachAskUserTool()
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, d := range ag.toolDefinitions() {
+		got[d.Function.Name] = true
+	}
+	for _, blocked := range []string{"write", "edit", "bash", "kspec_bootstrap"} {
+		if got[blocked] {
+			t.Fatalf("maestro toolset must not expose %q: %v", blocked, got)
+		}
+	}
+	for _, keep := range []string{"read", "glob", "grep", "task", "squad_kickoff", "ask_user"} {
+		if !got[keep] {
+			t.Fatalf("maestro toolset missing %q: %v", keep, got)
+		}
+	}
+}
+
+func TestSquadMaestroBlockedFromExecutionTools(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+
+	for _, name := range []string{"bash", "write", "edit", "kspec_bootstrap"} {
+		if !ag.squadBlocksTool(name) {
+			t.Fatalf("squadBlocksTool(%q) = false, want true", name)
+		}
+	}
+	if ag.squadBlocksTool(taskToolName) {
+		t.Fatal("squadBlocksTool(task) = true, want false")
+	}
+	if ag.squadBlocksTool("read") {
+		t.Fatal("squadBlocksTool(read) = true, want false")
+	}
+
+	_, err := ag.executeTool(context.Background(), "bash", `{"command":"echo hi"}`)
+	if err == nil || !strings.Contains(err.Error(), "squad mode") {
+		t.Fatalf("executeTool bash in squad mode: err = %v, want squad mode guard error", err)
+	}
+}
+
+func TestExecutionToolsAvailableOutsideSquadMaestro(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+
+	for _, name := range []string{"bash", "write", "edit"} {
+		if ag.squadBlocksTool(name) {
+			t.Fatalf("squadBlocksTool(%q) in sdd mode = true, want false", name)
+		}
+	}
+	got := map[string]bool{}
+	for _, d := range ag.toolDefinitions() {
+		got[d.Function.Name] = true
+	}
+	for _, keep := range []string{"bash", "write", "edit"} {
+		if !got[keep] {
+			t.Fatalf("sdd toolset missing %q: %v", keep, got)
+		}
+	}
+
+	res, err := ag.executeTool(context.Background(), "bash", `{"command":"echo ok"}`)
+	if err != nil {
+		t.Fatalf("executeTool bash in sdd mode: %v", err)
+	}
+	if !strings.Contains(res.Output, "ok") {
+		t.Fatalf("bash output = %q, want ok", res.Output)
+	}
+
+	sub := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	sub.depth = 1
+	sub.mode = "squad"
+	if sub.squadBlocksTool("bash") {
+		t.Fatal("squadBlocksTool(bash) at depth 1 = true, want false (subagents execute)")
+	}
+}
+
 func TestEnqueueUserMessage(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 
