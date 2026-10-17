@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"kterminal/internal/procmon"
 )
 
 func TestRegistryPassesContextToExecutor(t *testing.T) {
@@ -180,5 +182,58 @@ func TestExecuteNilHookNoop(t *testing.T) {
 	}
 	if res.Output != "edited "+path {
 		t.Fatalf("Output = %q, want %q", res.Output, "edited "+path)
+	}
+}
+
+func TestRegisterDedupOrder(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(bashTool(nil))
+	reg.Register(bashTool(nil))
+
+	bashSchemas := 0
+	for _, d := range reg.Definitions() {
+		if d.Function.Name == "bash" {
+			bashSchemas++
+		}
+	}
+	if bashSchemas != 1 {
+		t.Fatalf("Definitions() has %d bash schemas, want 1", bashSchemas)
+	}
+	seen := map[string]int{}
+	for _, name := range reg.order {
+		seen[name]++
+	}
+	for name, n := range seen {
+		if n > 1 {
+			t.Fatalf("order lists %q %d times", name, n)
+		}
+	}
+}
+
+func TestSetProcMonRewiresBash(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	reg := NewRegistry()
+	reg.SetProcMon(pm)
+
+	bashSchemas := 0
+	for _, d := range reg.Definitions() {
+		if d.Function.Name == "bash" {
+			bashSchemas++
+		}
+	}
+	if bashSchemas != 1 {
+		t.Fatalf("Definitions() has %d bash schemas, want 1 after rewire", bashSchemas)
+	}
+	if reg.ProcMon() != pm {
+		t.Fatal("ProcMon() does not return the injected manager")
+	}
+
+	res, err := reg.Execute(context.Background(), "bash", `{"command":"sleep 5","run_in_background":true}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Output, "background process 1 started") {
+		t.Fatalf("Output = %q, want background start", res.Output)
 	}
 }

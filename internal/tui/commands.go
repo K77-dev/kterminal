@@ -4,19 +4,21 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"kterminal/internal/kspec"
+	"kterminal/internal/procmon"
 )
 
 const kspecCommandPrefix = "/kspec-"
-const maxCommandSuggestions = 20
+const maxCommandSuggestions = 24
 const maxHelpLineRunes = 72
 const kspecKickoffPrefix = "Begin the "
 const kspecKickoffSuffix = " workflow now."
 
-var nativeCommands = []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
+var nativeCommands = []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
 
 var modeOptions = []string{"sdd", "squad"}
 
@@ -167,6 +169,86 @@ func (m Model) modePopupView() string {
 			b.WriteString(mentionItemStyle.Render("  " + item))
 		}
 	}
+	return mentionPopupStyle.Render(b.String())
+}
+
+func (m *Model) closeBgPopup() {
+	m.bgOpen = false
+	m.bgSelected = 0
+}
+
+func (m *Model) openBgPopup() {
+	m.closeCommandPopup()
+	m.bgOpen = true
+	m.bgSelected = 0
+}
+
+func (m Model) handleBgCommand() (tea.Model, tea.Cmd) {
+	if m.bgCount() == 0 {
+		m.blocks = append(m.blocks, resultStyle.Render("no background processes running"))
+		m.refreshContent()
+		return m, nil
+	}
+	m.openBgPopup()
+	return m, nil
+}
+
+func (m Model) bgEntries() []procmon.Entry {
+	if m.procMon == nil {
+		return nil
+	}
+	return m.procMon.List()
+}
+
+func (m *Model) clampBgSelection() {
+	if n := m.bgCount(); n > 0 {
+		if m.bgSelected >= n {
+			m.bgSelected = n - 1
+		}
+	} else {
+		m.bgSelected = 0
+	}
+}
+
+func (m Model) selectBg() (tea.Model, tea.Cmd) {
+	if !m.bgOpen || m.procMon == nil {
+		return m, nil
+	}
+	entries := m.procMon.List()
+	if m.bgSelected >= len(entries) {
+		return m, nil
+	}
+	m.procMon.Stop(entries[m.bgSelected].ID)
+	m.clampBgSelection()
+	return m, nil
+}
+
+func (m Model) bgPopupView() string {
+	if !m.bgOpen {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(chromeLabelStyle.Render("BACKGROUND"))
+	b.WriteString("\n")
+	entries := m.bgEntries()
+	if len(entries) == 0 {
+		b.WriteString(mentionItemStyle.Render("  no background processes running"))
+	} else {
+		budget := maxInt(m.chatWidth()-2*chatInset-24, 12)
+		for i, e := range entries {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			line := fmt.Sprintf("#%d · %s · %s", e.ID, truncate(e.Command, budget), time.Since(e.Started).Round(time.Second))
+			if i == m.bgSelected {
+				b.WriteString(mentionSelectedStyle.Render("▸ " + line))
+			} else {
+				b.WriteString(mentionItemStyle.Render("  " + line))
+			}
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("↑↓ move · enter stop · esc close"))
 	return mentionPopupStyle.Render(b.String())
 }
 

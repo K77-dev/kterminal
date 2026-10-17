@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 )
 
 type Result struct {
@@ -32,6 +33,7 @@ type Tool struct {
 type Registry struct {
 	tools    map[string]Tool
 	order    []string
+	procMon  *procmon.Manager
 	OnGoEdit func(path string) string
 }
 
@@ -42,7 +44,7 @@ func NewRegistry() *Registry {
 	r.Register(grepTool())
 	r.Register(writeTool())
 	r.Register(editTool())
-	r.Register(bashTool())
+	r.Register(bashTool(nil))
 	r.Register(kspecBootstrapTool())
 	return r
 }
@@ -57,8 +59,19 @@ func NewReadOnlyRegistry() *Registry {
 }
 
 func (r *Registry) Register(t Tool) {
+	if _, ok := r.tools[t.Name]; !ok {
+		r.order = append(r.order, t.Name)
+	}
 	r.tools[t.Name] = t
-	r.order = append(r.order, t.Name)
+}
+
+func (r *Registry) SetProcMon(pm *procmon.Manager) {
+	r.procMon = pm
+	r.Register(bashTool(pm))
+}
+
+func (r *Registry) ProcMon() *procmon.Manager {
+	return r.procMon
 }
 
 func (r *Registry) SetOnGoEdit(hook func(path string) string) {

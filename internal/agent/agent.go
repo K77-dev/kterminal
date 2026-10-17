@@ -556,6 +556,9 @@ func (a *Agent) newSubagent(description, guidance string) *Agent {
 		ready:           a.LLM != nil,
 		now:             a.now,
 	}
+	if a.Tools != nil {
+		sub.Tools.SetProcMon(a.Tools.ProcMon())
+	}
 	sub.messages = []llm.Message{
 		{Role: "system", Content: subagentSystemPrompt},
 		{Role: "user", Content: content},

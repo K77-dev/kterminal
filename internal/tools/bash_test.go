@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"kterminal/internal/procmon"
 )
 
 func TestBashCanceledContextKillsLongProcess(t *testing.T) {
@@ -150,5 +152,59 @@ func TestExecuteStreamTimeoutKillsProcess(t *testing.T) {
 	}
 	if len(lines) != 0 {
 		t.Fatalf("streamed lines = %v, want none", lines)
+	}
+}
+
+func TestBashBackgroundReturnsImmediately(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	reg := NewRegistry()
+	reg.SetProcMon(pm)
+
+	begin := time.Now()
+	res, err := reg.Execute(context.Background(), "bash", `{"command":"sleep 5","run_in_background":true}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if elapsed := time.Since(begin); elapsed >= time.Second {
+		t.Fatalf("Execute took %s, want <1s", elapsed)
+	}
+	if res.Output != "background process 1 started: sleep 5" {
+		t.Fatalf("Output = %q, want %q", res.Output, "background process 1 started: sleep 5")
+	}
+	if pm.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1", pm.Count())
+	}
+}
+
+func TestBashBackgroundSpawnError(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	reg := NewRegistry()
+	reg.SetProcMon(pm)
+
+	_, err := reg.Execute(context.Background(), "bash", `{"command":"exit 1","run_in_background":true}`)
+	if err == nil || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("Execute error = %v, want exit status 1", err)
+	}
+	if pm.Count() != 0 {
+		t.Fatalf("Count() = %d, want 0", pm.Count())
+	}
+}
+
+func TestBashBackgroundNilManager(t *testing.T) {
+	reg := NewRegistry()
+
+	_, err := reg.Execute(context.Background(), "bash", `{"command":"sleep 5","run_in_background":true}`)
+	if err == nil || !strings.Contains(err.Error(), "background execution unavailable") {
+		t.Fatalf("Execute error = %v, want background execution unavailable", err)
+	}
+
+	res, err := reg.Execute(context.Background(), "bash", `{"command":"echo sync ok"}`)
+	if err != nil {
+		t.Fatalf("sync Execute: %v", err)
+	}
+	if !strings.Contains(res.Output, "sync ok") {
+		t.Fatalf("sync Output = %q, want echo output", res.Output)
 	}
 }

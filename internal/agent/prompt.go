@@ -20,7 +20,7 @@ Identity:
 Tools:
 - read, glob, grep: inspect files and search the codebase.
 - write, edit: create and modify files; edit replaces an exact existing string.
-- bash: run shell commands (builds, tests, git).
+- bash: run shell commands (builds, tests, git); with run_in_background: true long-running processes (dev servers, watchers) return immediately and keep running — the user stops them via /bg.
 - task: delegate a focused subtask to an isolated subagent and get its final answer.
 - ask_user: ask the user structured questions with keyboard-navigable options.
 - kspec_bootstrap: write the kspec structure (.agents/, spec/tasks/) into the current project.

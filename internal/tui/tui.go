@@ -24,6 +24,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
 	"kterminal/internal/tools"
@@ -70,12 +71,14 @@ var thinkingFrames = spinner.Spinner{
 
 type agentEventMsg struct{ event agent.Event }
 type agentClosedMsg struct{}
+type procMonMsg struct{}
 
 type Model struct {
 	agent      *agent.Agent
 	cfg        *config.Config
 	catalog    *catalog.Catalog
 	kspecStore *kspec.Store
+	procMon    *procmon.Manager
 
 	state  string
 	vp     viewport.Model
@@ -116,6 +119,9 @@ type Model struct {
 
 	modelOpen     bool
 	modelSelected int
+
+	bgOpen     bool
+	bgSelected int
 
 	pendingUserQueue []string
 
@@ -159,6 +165,12 @@ func WithResumed(messages []llm.Message) Option {
 func WithKspec(s *kspec.Store) Option {
 	return func(m *Model) {
 		m.kspecStore = s
+	}
+}
+
+func WithProcMon(pm *procmon.Manager) Option {
+	return func(m *Model) {
+		m.procMon = pm
 	}
 }
 
@@ -305,8 +317,26 @@ func listenAgent(ch chan agent.Event) tea.Cmd {
 	}
 }
 
+func listenProcMon(ch <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		<-ch
+		return procMonMsg{}
+	}
+}
+
+func (m Model) bgCount() int {
+	if m.procMon == nil {
+		return 0
+	}
+	return m.procMon.Count()
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.blink, listenAgent(m.agent.Events))
+	var procMon tea.Cmd
+	if m.procMon != nil {
+		procMon = listenProcMon(m.procMon.Events())
+	}
+	return tea.Batch(m.blink, listenAgent(m.agent.Events), procMon)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -325,6 +355,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentClosedMsg:
+		return m, nil
+
+	case procMonMsg:
+		if m.procMon != nil {
+			return m, listenProcMon(m.procMon.Events())
+		}
 		return m, nil
 
 	case agentEventMsg:
@@ -645,6 +681,26 @@ func renderDiffLine(d tools.DiffLine) string {
 
 func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.copyFlash = ""
+	if m.bgOpen {
+		switch msg.String() {
+		case "tab", "enter":
+			return m.selectBg()
+		case "esc", "q":
+			m.closeBgPopup()
+			return m, nil
+		case "up":
+			if n := len(m.bgEntries()); n > 0 {
+				m.bgSelected = (m.bgSelected - 1 + n) % n
+			}
+			return m, nil
+		case "down":
+			if n := len(m.bgEntries()); n > 0 {
+				m.bgSelected = (m.bgSelected + 1) % n
+			}
+			return m, nil
+		}
+		return m, nil
+	}
 	if m.modeOpen {
 		switch msg.String() {
 		case "tab", "enter":
@@ -1050,6 +1106,7 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 			"/jev on|off — toggle Jev routing · /jev — show state",
 			"/model <name> — pin a model, persisted across restarts · /model auto — let Jev decide",
 			"/mode — switch between sdd and squad modes",
+			"/bg — background processes",
 			"/image <path> — attach an image · /image — list pending · /unimage <n> — remove",
 			"/clear — clear the conversation",
 			"/help — this help",
@@ -1087,6 +1144,8 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 	case "/mode":
 		m.openModePopup()
 		return m, nil
+	case "/bg":
+		return m.handleBgCommand()
 	case "/model":
 		return m.handleModelCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
 	case "/image":
@@ -1451,44 +1510,42 @@ func (m Model) hintBar() string {
 		left = m.spin.View() + helpStyle.Render(verb)
 	}
 
-	sep := helpStyle.Render(" · ")
-	right := ""
+	var segments []string
 	if m.copyFlash != "" {
-		right += successStyle.Render(m.copyFlash) + sep
+		segments = append(segments, successStyle.Render(m.copyFlash))
 	}
 	if !m.follow {
-		right += warningStyle.Render("↑ scrolled") + helpStyle.Render(" · end to jump · ")
+		segments = append(segments, warningStyle.Render("↑ scrolled")+helpStyle.Render(" · end to jump"))
 	}
 	if m.busy {
-		right += warningStyle.Render("esc to interrupt") + sep
-	}
-	right += primaryStyle.Render("/") + helpStyle.Render(" commands")
-	if m.resumedCount > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d messages", m.resumedCount))
+		segments = append(segments, warningStyle.Render("esc to interrupt"))
 	}
 	if s := m.agent.ActiveSkill(); s != "" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
+		segments = append(segments, primaryStyle.Render("skill "+s))
 	}
-	if m.agent.Mode() == "squad" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
+	if n := m.bgCount(); n > 0 {
+		segments = append(segments, primaryStyle.Render(fmt.Sprintf("bg %d", n)))
 	}
-	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("jev")
-	} else {
-		right += helpStyle.Render(" · ") + warningStyle.Render("jev off")
+	if !m.cfg.Typesafe.JevEnabled() || m.cfg.Typesafe.APIKey == "" {
+		segments = append(segments, warningStyle.Render("jev off"))
 	}
-	if p := m.agent.Pinned(); p != "" {
-		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
+	model := m.currentModel
+	if model == "" {
+		model = m.agent.Pinned()
 	}
-	if m.currentModel != "" {
-		right += helpStyle.Render(" · ") + routeStyle.Render(m.currentModel)
+	if model != "" {
+		if m.agent.Pinned() != "" {
+			model = "⚑ " + model
+		}
+		segments = append(segments, routeStyle.Render(model))
 	}
 	if m.sessionCost > 0 {
-		right += helpStyle.Render(" · ") + routeStyle.Render(formatCost(m.sessionCost))
+		segments = append(segments, routeStyle.Render(formatCost(m.sessionCost)))
 	}
 	if m.lastTPS > 0 {
-		right += helpStyle.Render(" · ") + routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS))
+		segments = append(segments, routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS)))
 	}
+	right := strings.Join(segments, helpStyle.Render(" · "))
 
 	gap := width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -1553,6 +1610,10 @@ func (m Model) chatView() string {
 		b.WriteString("\n")
 	}
 	if popup := m.modelPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.bgPopupView(); popup != "" {
 		b.WriteString(indentLines(popup, chatInset))
 		b.WriteString("\n")
 	}

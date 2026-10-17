@@ -22,6 +22,7 @@ import (
 	"kterminal/internal/jev"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
@@ -5777,5 +5778,93 @@ func TestSquadResumeLoadLatestRestoresMesa(t *testing.T) {
 	}
 	if snap2.Mesa.Convocations != 0 || snap2.Mesa.Tokens != 0 {
 		t.Fatalf("follow-up snapshot counters = %d/%d, want 0/0 reset for the new turn", snap2.Mesa.Convocations, snap2.Mesa.Tokens)
+	}
+}
+
+func TestSubagentSharesProcMon(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_1", "task", `{"description":"start a server"}`),
+		toolCallChunks("call_bg", "bash", `{"command":"sleep 30","run_in_background":true}`),
+		contentChunks("subagent started the server", 10, 2),
+		contentChunks("parent done", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachTaskTool()
+	ag.Tools.SetProcMon(pm)
+
+	ag.Run("delegate a server start")
+	collectParentTurnEvents(t, ag)
+
+	if pm.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1 (subagent process in the parent manager)", pm.Count())
+	}
+	if len(calls) != 4 {
+		t.Fatalf("gateway calls = %d, want 4 (parent, subagent, subagent, parent)", len(calls))
+	}
+}
+
+func TestBackgroundSurvivesTurnEnd(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{
+		toolCallChunks("call_bg", "bash", `{"command":"sleep 30","run_in_background":true}`),
+		contentChunks("started the server", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.Tools.SetProcMon(pm)
+
+	ag.Run("start a server")
+	events := collectParentTurnEvents(t, ag)
+
+	sawDone := false
+	for _, e := range events {
+		if e.Kind == EventTurnDone && e.Depth == 0 {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatal("no parent turn_done event")
+	}
+	if pm.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1 (background survives turn end)", pm.Count())
+	}
+}
+
+func TestBackgroundSurvivesEsc(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	var calls []chatCall
+	gw := subagentBlockGateway(t, 1, "streaming when aborted", [][]string{
+		toolCallChunks("call_bg", "bash", `{"command":"sleep 30","run_in_background":true}`),
+		contentChunks("never reached", 20, 1),
+	}, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.Tools.SetProcMon(pm)
+
+	ag.Run("start a server")
+	deadline := time.After(10 * time.Second)
+	aborted := false
+	for !aborted {
+		select {
+		case e := <-ag.Events:
+			if e.Kind == EventToolResult && e.Tool == "bash" {
+				ag.Cancel()
+			}
+			if e.Kind == EventTurnAborted && e.Depth == 0 {
+				aborted = true
+			}
+		case <-deadline:
+			t.Fatal("turn was not aborted")
+		}
+	}
+	if pm.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1 (background survives esc)", pm.Count())
 	}
 }

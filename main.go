@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +21,7 @@ import (
 	"kterminal/internal/jev"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 	"kterminal/internal/router"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
@@ -89,8 +92,10 @@ func main() {
 	}
 	primary, fallback := router.Wire(cfg.Typesafe.APIKey, cfg.Typesafe.JevEnabled(), cfg.Model, cat)
 
+	pm := procmon.New()
 	reg := tools.NewRegistry()
 	reg.SetOnGoEdit(tools.GoVetHook)
+	reg.SetProcMon(pm)
 
 	ag := agent.New(llmClient, primary, fallback, cat, reg, sess, *confirm)
 	ag.SetPinned(cfg.Model)
@@ -122,20 +127,29 @@ func main() {
 	}
 
 	dark := lipgloss.HasDarkBackground()
-	opts := []tui.Option{tui.WithKspec(kspecStore)}
+	opts := []tui.Option{tui.WithKspec(kspecStore), tui.WithProcMon(pm)}
 	if len(resumed.Messages) > 0 {
 		opts = append(opts, tui.WithResumed(resumed.Messages))
 	}
 	if freshWarning {
 		opts = append(opts, tui.WithFreshWarning())
 	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		pm.KillAll()
+		os.Exit(0)
+	}()
 	p := tea.NewProgram(tui.New(ag, cfg, cat, dark, opts...), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
+		pm.KillAll()
 		fmt.Fprintln(os.Stderr, "error:", err)
 		sess.Close()
 		store.Close()
 		os.Exit(1)
 	}
+	pm.KillAll()
 	sess.Close()
 }
 

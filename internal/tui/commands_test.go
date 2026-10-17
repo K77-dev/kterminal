@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,6 +21,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 	"kterminal/internal/router"
 	"kterminal/internal/tools"
 )
@@ -344,6 +347,7 @@ func TestHelpListsKspecCommands(t *testing.T) {
 	plain := stripANSI(m.contentRaw)
 	for _, want := range []string{
 		"/config — configure gateway and API keys",
+		"/bg — background processes",
 		"kspec skills:",
 		"/kspec-prd",
 		"/kspec-version",
@@ -444,7 +448,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected command popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -452,7 +456,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 		t.Fatalf("selected = %d, want 0 on open", m.cmdSelected)
 	}
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "▸ /clear") {
+	if !strings.Contains(view, "▸ /bg") {
 		t.Fatalf("view missing the selected command:\n%s", view)
 	}
 	if !strings.Contains(view, "  /kspec-prd") {
@@ -523,7 +527,7 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected popup open after typing /")
 	}
-	want := []string{"/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -531,6 +535,142 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
 	if m.cmdOpen {
 		t.Fatal("no store means no /kspec-* suggestions")
+	}
+}
+
+func waitForBgCount(t *testing.T, pm *procmon.Manager, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if pm.Count() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("Count() = %d, want %d within %s", pm.Count(), want, within)
+}
+
+func TestBgPopupOpenListStop(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	for i := 0; i < 2; i++ {
+		if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+	}
+
+	m = runCommand(t, m, "/bg")
+	if !m.bgOpen {
+		t.Fatal("expected bg popup open after /bg")
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "#1 · sleep 30") || !strings.Contains(view, "#2 · sleep 30") {
+		t.Fatalf("popup missing the process list:\n%s", view)
+	}
+	if !strings.Contains(view, "↑↓ move · enter stop · esc close") {
+		t.Fatalf("popup missing the help line:\n%s", view)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	waitForBgCount(t, pm, 1, 3*time.Second)
+	if !m.bgOpen {
+		t.Fatal("popup must stay open after a stop")
+	}
+	view = stripANSI(m.View())
+	if strings.Contains(view, "#2 ·") {
+		t.Fatalf("popup must refresh the list after a stop:\n%s", view)
+	}
+	if !strings.Contains(stripANSI(m.hintBar()), "bg 1") {
+		t.Fatalf("hint bar must show bg 1:\n%s", stripANSI(m.hintBar()))
+	}
+}
+
+func TestBgPopupEscStopsNothing(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	for i := 0; i < 2; i++ {
+		if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+	}
+
+	m = runCommand(t, m, "/bg")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.bgOpen {
+		t.Fatal("esc must close the bg popup")
+	}
+	if pm.Count() != 2 {
+		t.Fatalf("Count() = %d, want 2 (esc stops nothing)", pm.Count())
+	}
+}
+
+func TestBgPopupEmptyState(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = runCommand(t, m, "/bg")
+	if m.bgOpen {
+		t.Fatal("/bg with zero processes must not open the popup")
+	}
+	if !strings.Contains(stripANSI(m.contentRaw), "no background processes running") {
+		t.Fatalf("chat missing the empty-state message:\n%s", stripANSI(m.contentRaw))
+	}
+}
+
+func TestBgPopupSelectionClamps(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	for i := 0; i < 2; i++ {
+		if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+	}
+
+	m = runCommand(t, m, "/bg")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	waitForBgCount(t, pm, 1, 3*time.Second)
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	waitForBgCount(t, pm, 0, 3*time.Second)
+	if m.bgSelected != 0 {
+		t.Fatalf("bgSelected = %d, want 0 clamped on empty list", m.bgSelected)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if !m.bgOpen {
+		t.Fatal("popup must survive no-op keys on the empty list")
+	}
+}
+
+func TestBgPopupKeyRouting(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	m = runCommand(t, m, "/bg")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("xyz")})
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("typing must not reach the input with the bg popup open, got %q", got)
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if got := len(textBeforeCursor(m.input)); got != 0 {
+		t.Fatalf("arrows must not move the textarea cursor, pos=%d", got)
+	}
+	if !m.bgOpen {
+		t.Fatal("typing must not close the popup")
 	}
 }
 
@@ -559,8 +699,8 @@ func TestModeCommandSwitchesToSquad(t *testing.T) {
 	if got := ag.Mode(); got != "squad" {
 		t.Fatalf("mode = %q, want squad", got)
 	}
-	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "mode squad") {
-		t.Fatalf("hint bar missing the mode:\n%s", hint)
+	if hint := stripANSI(m.hintBar()); strings.Contains(hint, "mode squad") {
+		t.Fatalf("hint bar must not show the mode segment anymore:\n%s", hint)
 	}
 
 	m = runCommand(t, m, "/mode")

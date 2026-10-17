@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 )
 
 const bashTimeout = 120 * time.Second
 const maxBashOutput = 32 * 1024
 
-func bashTool() Tool {
+func bashTool(pm *procmon.Manager) Tool {
 	return Tool{
 		Name:     "bash",
 		Mutating: true,
@@ -26,25 +27,36 @@ func bashTool() Tool {
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"command": map[string]any{"type": "string", "description": "Shell command to execute"},
+						"command":           map[string]any{"type": "string", "description": "Shell command to execute"},
+						"run_in_background": map[string]any{"type": "boolean", "description": "Set true for long-running processes (dev servers, watchers, long builds): the command returns immediately and keeps running in the background. Output is discarded."},
 					},
 					"required": []string{"command"},
 				},
 			},
 		},
 		Execute: func(ctx context.Context, args map[string]any) (Result, error) {
-			return runBash(ctx, args, nil)
+			return runBash(ctx, args, nil, pm)
 		},
 		ExecuteStream: func(ctx context.Context, args map[string]any, onLine func(string)) (Result, error) {
-			return runBash(ctx, args, onLine)
+			return runBash(ctx, args, onLine, pm)
 		},
 	}
 }
 
-func runBash(ctx context.Context, args map[string]any, onLine func(string)) (Result, error) {
+func runBash(ctx context.Context, args map[string]any, onLine func(string), pm *procmon.Manager) (Result, error) {
 	command, err := str(args, "command")
 	if err != nil {
 		return Result{}, err
+	}
+	if optBool(args, "run_in_background") {
+		if pm == nil {
+			return Result{}, fmt.Errorf("background execution unavailable")
+		}
+		entry, err := pm.Start(ctx, command)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Output: fmt.Sprintf("background process %d started: %s", entry.ID, command)}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
 	defer cancel()

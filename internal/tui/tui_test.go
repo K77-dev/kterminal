@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"kterminal/internal/catalog"
 	"kterminal/internal/config"
 	"kterminal/internal/llm"
+	"kterminal/internal/procmon"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
 	"kterminal/internal/tools"
@@ -993,21 +995,23 @@ func TestHintBarShowsEscToInterruptWhenBusy(t *testing.T) {
 func TestHintBarShowsRoutingState(t *testing.T) {
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.cwd = "/stable/cwd"
 
 	m.cfg.Typesafe.APIKey = "jev-key"
 	hint := stripANSI(m.hintBar())
-	if !strings.Contains(hint, "jev") || strings.Contains(hint, "jev off") {
-		t.Fatalf("hint bar must show jev when enabled with an api key:\n%s", hint)
+	if strings.Contains(hint, "jev") {
+		t.Fatalf("hint bar must not show a positive jev segment:\n%s", hint)
 	}
 
 	m.agent.SetPinned("glm-5.3")
 	hint = stripANSI(m.hintBar())
-	if !strings.Contains(hint, "pinned glm-5.3") {
-		t.Fatalf("hint bar missing the pinned indicator:\n%s", hint)
+	if !strings.Contains(hint, "⚑ glm-5.3") {
+		t.Fatalf("hint bar missing the pinned model marker:\n%s", hint)
 	}
-	if !strings.Contains(hint, "jev") || strings.Contains(hint, "jev off") {
-		t.Fatalf("hint bar must keep the jev indicator alongside the pin:\n%s", hint)
+	if strings.Contains(hint, "pinned glm-5.3") {
+		t.Fatalf("hint bar must not show a separate pinned segment:\n%s", hint)
+	}
+	if strings.Contains(hint, "jev") {
+		t.Fatalf("hint bar must not show a positive jev segment alongside the pin:\n%s", hint)
 	}
 
 	disabled := false
@@ -1016,8 +1020,8 @@ func TestHintBarShowsRoutingState(t *testing.T) {
 	if !strings.Contains(hint, "jev off") {
 		t.Fatalf("hint bar must show jev off when disabled:\n%s", hint)
 	}
-	if !strings.Contains(hint, "pinned glm-5.3") {
-		t.Fatalf("hint bar must keep the pinned indicator with jev off:\n%s", hint)
+	if !strings.Contains(hint, "⚑ glm-5.3") {
+		t.Fatalf("hint bar must keep the pinned model marker with jev off:\n%s", hint)
 	}
 
 	m.cfg.Typesafe.Enabled = nil
@@ -1025,6 +1029,127 @@ func TestHintBarShowsRoutingState(t *testing.T) {
 	hint = stripANSI(m.hintBar())
 	if !strings.Contains(hint, "jev off") {
 		t.Fatalf("hint bar must show jev off without an api key:\n%s", hint)
+	}
+}
+
+func TestHintBarSlimmedSegments(t *testing.T) {
+	m := newTestModel(t, WithResumed(resumedFixture(3)))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if err := m.agent.ActivateMode("squad"); err != nil {
+		t.Fatalf("ActivateMode: %v", err)
+	}
+	m.cfg.Typesafe.APIKey = "jev-key"
+	m.agent.SetPinned("glm-5.3")
+
+	hint := stripANSI(m.hintBar())
+	for _, gone := range []string{"/ commands", "mode squad", "resumed", "jev", "pinned"} {
+		if strings.Contains(hint, gone) {
+			t.Fatalf("hint bar must not show %q:\n%s", gone, hint)
+		}
+	}
+	if strings.Count(hint, "glm-5.3") != 1 || !strings.Contains(hint, "⚑ glm-5.3") {
+		t.Fatalf("hint bar must show the model exactly once with the pin marker:\n%s", hint)
+	}
+}
+
+func TestHintBarJevOffStillShown(t *testing.T) {
+	m := newTestModel(t)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	hint := stripANSI(m.hintBar())
+	if !strings.Contains(hint, "jev off") {
+		t.Fatalf("hint bar must keep the jev off deviation visible:\n%s", hint)
+	}
+}
+
+func TestBgBadgeHiddenWhenZero(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	withMgr := newTestModel(t, WithProcMon(pm))
+	withMgr = step(t, withMgr, tea.WindowSizeMsg{Width: 100, Height: 30})
+	plain := newTestModel(t)
+	plain = step(t, plain, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	if withMgr.hintBar() != plain.hintBar() {
+		t.Fatalf("hint bar with a zero-count manager must be byte-identical:\nwith:  %q\nplain: %q", withMgr.hintBar(), plain.hintBar())
+	}
+}
+
+func TestBgBadgeShowsCount(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	hint := stripANSI(m.hintBar())
+	if !strings.Contains(hint, "bg 1") {
+		t.Fatalf("hint bar missing bg 1:\n%s", hint)
+	}
+
+	if _, err := pm.Start(context.Background(), "sleep 30"); err != nil {
+		t.Fatalf("Start 2: %v", err)
+	}
+	hint = stripANSI(m.hintBar())
+	if !strings.Contains(hint, "bg 2") {
+		t.Fatalf("hint bar missing bg 2:\n%s", hint)
+	}
+}
+
+func TestBgBadgeLiveDecrement(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	if _, err := pm.Start(context.Background(), "sleep 1"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(stripANSI(m.hintBar()), "bg 1") {
+		t.Fatalf("hint bar missing bg 1:\n%s", stripANSI(m.hintBar()))
+	}
+
+	select {
+	case <-pm.Events():
+	case <-time.After(5 * time.Second):
+		t.Fatal("no manager event after natural exit")
+	}
+	m = step(t, m, procMonMsg{})
+	hint := stripANSI(m.hintBar())
+	if strings.Contains(hint, "bg") {
+		t.Fatalf("hint bar must drop the bg segment after the wake:\n%s", hint)
+	}
+}
+
+func TestInitBatchesProcMonListener(t *testing.T) {
+	pm := procmon.New()
+	t.Cleanup(pm.KillAll)
+	m := newTestModel(t, WithProcMon(pm))
+	if m.procMon != pm {
+		t.Fatal("WithProcMon did not set the manager")
+	}
+	if m.Init() == nil {
+		t.Fatal("Init must return a batch command")
+	}
+
+	e, err := pm.Start(context.Background(), "sleep 30")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- listenProcMon(pm.Events())() }()
+	if !pm.Stop(e.ID) {
+		t.Fatal("Stop = false, want true")
+	}
+	select {
+	case msg := <-done:
+		if _, ok := msg.(procMonMsg); !ok {
+			t.Fatalf("msg = %T, want procMonMsg", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("listenProcMon did not wake on a manager event")
 	}
 }
 
@@ -1331,28 +1456,6 @@ func TestResumedReconstructsBlocks(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	if len(m.blocks) != 26 {
 		t.Fatalf("resize must not rebuild resumed blocks, blocks = %d, want 26", len(m.blocks))
-	}
-}
-
-func TestHintBarShowsResumed(t *testing.T) {
-	m := newTestModel(t, WithResumed(resumedFixture(3)))
-	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-
-	view := stripANSI(m.View())
-	if !strings.Contains(view, "resumed · 3 messages") {
-		t.Fatalf("hint bar missing resumed indicator:\n%s", view)
-	}
-
-	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	view = stripANSI(m.View())
-	if !strings.Contains(view, "resumed · 3 messages") {
-		t.Fatalf("hint bar must keep the resumed indicator after resize:\n%s", view)
-	}
-
-	fresh := newTestModel(t)
-	fresh = step(t, fresh, tea.WindowSizeMsg{Width: 100, Height: 30})
-	if strings.Contains(stripANSI(fresh.View()), "resumed") {
-		t.Fatal("hint bar must not show resumed without loaded messages")
 	}
 }
 
@@ -2667,44 +2770,42 @@ func legacyHintBar(m Model) string {
 		left = m.spin.View() + helpStyle.Render(verb)
 	}
 
-	sep := helpStyle.Render(" · ")
-	right := ""
+	var segments []string
 	if m.copyFlash != "" {
-		right += successStyle.Render(m.copyFlash) + sep
+		segments = append(segments, successStyle.Render(m.copyFlash))
 	}
 	if !m.follow {
-		right += warningStyle.Render("↑ scrolled") + helpStyle.Render(" · end to jump · ")
+		segments = append(segments, warningStyle.Render("↑ scrolled")+helpStyle.Render(" · end to jump"))
 	}
 	if m.busy {
-		right += warningStyle.Render("esc to interrupt") + sep
-	}
-	right += primaryStyle.Render("/") + helpStyle.Render(" commands")
-	if m.resumedCount > 0 {
-		right += helpStyle.Render(fmt.Sprintf(" · resumed · %d messages", m.resumedCount))
+		segments = append(segments, warningStyle.Render("esc to interrupt"))
 	}
 	if s := m.agent.ActiveSkill(); s != "" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("skill "+s)
+		segments = append(segments, primaryStyle.Render("skill "+s))
 	}
-	if m.agent.Mode() == "squad" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("mode squad")
+	if n := m.bgCount(); n > 0 {
+		segments = append(segments, primaryStyle.Render(fmt.Sprintf("bg %d", n)))
 	}
-	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
-		right += helpStyle.Render(" · ") + primaryStyle.Render("jev")
-	} else {
-		right += helpStyle.Render(" · ") + warningStyle.Render("jev off")
+	if !m.cfg.Typesafe.JevEnabled() || m.cfg.Typesafe.APIKey == "" {
+		segments = append(segments, warningStyle.Render("jev off"))
 	}
-	if p := m.agent.Pinned(); p != "" {
-		right += helpStyle.Render(" · ") + warningStyle.Render("pinned "+p)
+	model := m.currentModel
+	if model == "" {
+		model = m.agent.Pinned()
 	}
-	if m.currentModel != "" {
-		right += helpStyle.Render(" · ") + routeStyle.Render(m.currentModel)
+	if model != "" {
+		if m.agent.Pinned() != "" {
+			model = "⚑ " + model
+		}
+		segments = append(segments, routeStyle.Render(model))
 	}
 	if m.sessionCost > 0 {
-		right += helpStyle.Render(" · ") + routeStyle.Render(formatCost(m.sessionCost))
+		segments = append(segments, routeStyle.Render(formatCost(m.sessionCost)))
 	}
 	if m.lastTPS > 0 {
-		right += helpStyle.Render(" · ") + routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS))
+		segments = append(segments, routeStyle.Render(fmt.Sprintf("%.0f tok/s", m.lastTPS)))
 	}
+	right := strings.Join(segments, helpStyle.Render(" · "))
 
 	gap := width - 2*chatInset - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -2750,6 +2851,10 @@ func legacyChatView(m Model) string {
 		b.WriteString("\n")
 	}
 	if popup := m.modelPopupView(); popup != "" {
+		b.WriteString(indentLines(popup, chatInset))
+		b.WriteString("\n")
+	}
+	if popup := m.bgPopupView(); popup != "" {
 		b.WriteString(indentLines(popup, chatInset))
 		b.WriteString("\n")
 	}
