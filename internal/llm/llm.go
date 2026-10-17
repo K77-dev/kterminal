@@ -379,6 +379,11 @@ func IsRateLimited(err error) bool {
 	return errors.As(err, &se) && se.code == http.StatusTooManyRequests
 }
 
+func IsModelUnavailable(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusNotFound
+}
+
 func isTransient(err error) bool {
 	if err == nil {
 		return false

@@ -565,6 +565,25 @@ func TestIsRateLimited(t *testing.T) {
 	}
 }
 
+func TestIsModelUnavailable(t *testing.T) {
+	notFound := &statusError{code: http.StatusNotFound, status: "404 Not Found", body: `{"error":{"message":"litellm.NotFoundError: Invalid model"}}`}
+	if !IsModelUnavailable(notFound) {
+		t.Fatal("404 status error must be detected as model unavailable")
+	}
+	if !IsModelUnavailable(fmt.Errorf("chat stream failed after 1 attempt (model deepseek-v4-pro): %w", notFound)) {
+		t.Fatal("wrapped 404 must be detected as model unavailable")
+	}
+	if IsModelUnavailable(fmt.Errorf("wrap: %w", &statusError{code: http.StatusTooManyRequests, status: "429 Too Many Requests", body: "{}"})) {
+		t.Fatal("429 is rate limited, not unavailable")
+	}
+	if IsModelUnavailable(errors.New("boom")) {
+		t.Fatal("generic error is not model unavailable")
+	}
+	if IsModelUnavailable(nil) {
+		t.Fatal("nil is not model unavailable")
+	}
+}
+
 func TestBackoffDuration(t *testing.T) {
 	client := New("https://host", "key", false)
 	client.retryBase = time.Second

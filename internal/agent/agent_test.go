@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -722,6 +723,226 @@ func TestHeuristicRouterRouting(t *testing.T) {
 	d, err = r.Route(ctx, "make me a sandwich", cat.Models)
 	if err != nil || d.Model != cat.DefaultModel {
 		t.Fatalf("default task -> %+v err=%v, want %s", d, err, cat.DefaultModel)
+	}
+}
+
+func TestModelHealthBlocksAndFilters(t *testing.T) {
+	h := newModelHealth()
+	cat := testCatalog(t)
+
+	if got := h.filter(cat.Models); len(got) != len(cat.Models) {
+		t.Fatalf("filter on empty health changed the list: %d", len(got))
+	}
+
+	h.block("deepseek-v4-pro")
+	if !h.isBlocked("deepseek-v4-pro") {
+		t.Fatal("deepseek-v4-pro should be blocked")
+	}
+	got := h.filter(cat.Models)
+	for _, m := range got {
+		if m.Name == "deepseek-v4-pro" {
+			t.Fatal("filter kept the blocked model")
+		}
+	}
+	if len(got) != len(cat.Models)-1 {
+		t.Fatalf("filtered = %d models, want %d", len(got), len(cat.Models)-1)
+	}
+
+	for _, m := range cat.Models {
+		h.block(m.Name)
+	}
+	if all := h.filter(cat.Models); len(all) != 0 {
+		t.Fatalf("filter with everything blocked = %d, want 0", len(all))
+	}
+
+	var nilHealth *modelHealth
+	nilHealth.block("x")
+	if nilHealth.isBlocked("x") {
+		t.Fatal("nil modelHealth must be a no-op")
+	}
+	if nilHealth.filter(cat.Models) == nil {
+		t.Fatal("nil modelHealth filter must return the input")
+	}
+}
+
+type recordingRouter struct {
+	candidates []catalog.Model
+}
+
+func (r *recordingRouter) Route(_ context.Context, _ string, candidates []catalog.Model) (router.Decision, error) {
+	r.candidates = candidates
+	return router.Decision{Model: candidates[0].Name, Confidence: 1, Router: "recording"}, nil
+}
+
+func TestDecideExcludesBlockedModels(t *testing.T) {
+	cat := testCatalog(t)
+	rec := &recordingRouter{}
+	ag := New(nil, rec, nil, cat, tools.NewRegistry(), nil, false)
+	ag.candidates = cat.Models
+
+	if _, err := ag.decide(context.Background(), llm.Message{Role: "user", Content: "hello"}, 0); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if len(rec.candidates) != len(cat.Models) {
+		t.Fatalf("candidates = %d, want the full catalog %d", len(rec.candidates), len(cat.Models))
+	}
+
+	ag.modelHealth.block("deepseek-v4-pro")
+	if _, err := ag.decide(context.Background(), llm.Message{Role: "user", Content: "hello"}, 0); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	for _, m := range rec.candidates {
+		if m.Name == "deepseek-v4-pro" {
+			t.Fatal("decide offered the blocked model to the router")
+		}
+	}
+
+	for _, m := range cat.Models {
+		ag.modelHealth.block(m.Name)
+	}
+	if _, err := ag.decide(context.Background(), llm.Message{Role: "user", Content: "hello"}, 0); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if len(rec.candidates) != len(cat.Models) {
+		t.Fatalf("with every model blocked, candidates = %d, want the full list (retry beats hard fail)", len(rec.candidates))
+	}
+}
+
+func TestSubagentSharesModelHealth(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.modelHealth.block("deepseek-v4-pro")
+
+	sub := ag.newSubagent("describe the mesa", "guidance")
+	if sub.modelHealth != ag.modelHealth {
+		t.Fatal("newSubagent must share the parent modelHealth pointer")
+	}
+	if !sub.modelHealth.isBlocked("deepseek-v4-pro") {
+		t.Fatal("subagent must see the model blocked by the parent")
+	}
+}
+
+func TestModelUnavailableFallsBackAndFeedsBack(t *testing.T) {
+	cat := testCatalog(t)
+	const badModel = "deepseek-v4-pro"
+
+	var badModelHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", modelsHandler(t))
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Model == badModel {
+			badModelHits.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"message":"litellm.NotFoundError: Invalid model. Received Model Group=`+badModel+`"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range contentChunks("ok", 5, 1) {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	gw := httptest.NewServer(mux)
+	t.Cleanup(gw.Close)
+
+	jevSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Questions map[string]struct {
+				Criteria map[string]string `json:"criteria"`
+			} `json:"questions"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		keys := make([]string, 0, len(req.Questions["model_choice"].Criteria))
+		for k := range req.Questions["model_choice"].Criteria {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		choice := ""
+		for _, k := range keys {
+			if k == badModel {
+				choice = badModel
+				break
+			}
+		}
+		if choice == "" && len(keys) > 0 {
+			choice = keys[0]
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"model": "jev-test",
+			"answers": map[string]any{
+				"model_choice": map[string]any{
+					"type":          "choice",
+					"choice":        choice,
+					"confidence":    0.9,
+					"probabilities": map[string]float64{choice: 0.9},
+				},
+			},
+		})
+	}))
+	t.Cleanup(jevSrv.Close)
+
+	jevClient := jev.New("test-key")
+	jevClient.BaseURL = jevSrv.URL
+	ag := New(
+		llm.New(gw.URL, "gw-key", false),
+		router.NewJev(jevClient),
+		&router.HeuristicRouter{Default: cat.DefaultModel},
+		cat,
+		tools.NewRegistry(),
+		nil,
+		false,
+	)
+
+	ag.Run("hello")
+	events := collectEvents(t, ag)
+	for _, e := range events {
+		if e.Kind == EventError {
+			t.Fatalf("unexpected error event: %s", e.Text)
+		}
+	}
+	if got := badModelHits.Load(); got != 1 {
+		t.Fatalf("bad model hits = %d, want exactly 1 (404 then fallback)", got)
+	}
+	if !ag.modelHealth.isBlocked(badModel) {
+		t.Fatal("the 404 model must be blocked after the failure")
+	}
+	var fallback *Event
+	for i := range events {
+		if events[i].Kind == EventRoute && events[i].Reason == "model unavailable (404), next best model" {
+			fallback = &events[i]
+		}
+	}
+	if fallback == nil {
+		t.Fatal("missing the model-unavailable fallback route event")
+	}
+	if fallback.Model == badModel {
+		t.Fatalf("fallback model = %q, want any model other than the blocked one", fallback.Model)
+	}
+
+	ag.Run("hello again")
+	events = collectEvents(t, ag)
+	for _, e := range events {
+		if e.Kind == EventError {
+			t.Fatalf("unexpected error event on the second turn: %s", e.Text)
+		}
+	}
+	if got := badModelHits.Load(); got != 1 {
+		t.Fatalf("bad model hits after the second turn = %d, want 1 (the blocked model must not be retried)", got)
+	}
+	var lastRoute *Event
+	for i := range events {
+		if events[i].Kind == EventRoute {
+			lastRoute = &events[i]
+		}
+	}
+	if lastRoute == nil || lastRoute.Model != "deepseek-v4-flash" || lastRoute.Router != "jev" {
+		t.Fatalf("second turn route = %+v, want deepseek-v4-flash via jev (blocked model filtered before routing)", lastRoute)
 	}
 }
 

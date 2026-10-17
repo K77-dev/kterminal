@@ -124,6 +124,7 @@ type Agent struct {
 	squadPins         map[string]string
 	squadLimits       squad.Limits
 	mesa              *squad.Mesa
+	modelHealth       *modelHealth
 }
 
 func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *catalog.Catalog, reg *tools.Registry, sess *session.Writer, confirm bool) *Agent {
@@ -137,6 +138,7 @@ func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *ca
 		Confirm:         confirm,
 		Events:          make(chan Event, 512),
 		subagentTimeout: subagentTimeout,
+		modelHealth:     newModelHealth(),
 		ready:           llmClient != nil,
 		now:             time.Now,
 	}
@@ -392,6 +394,7 @@ func (a *Agent) RunSyncPersona(ctx context.Context, persona squad.Persona, descr
 		Events:          make(chan Event, 512),
 		depth:           a.depth + 1,
 		subagentTimeout: a.subagentTimeout,
+		modelHealth:     a.modelHealth,
 		ready:           a.LLM != nil,
 		now:             a.now,
 		agentName:       persona.Name,
@@ -553,6 +556,7 @@ func (a *Agent) newSubagent(description, guidance string) *Agent {
 		Events:          make(chan Event, 512),
 		depth:           a.depth + 1,
 		subagentTimeout: a.subagentTimeout,
+		modelHealth:     a.modelHealth,
 		ready:           a.LLM != nil,
 		now:             a.now,
 	}
@@ -778,6 +782,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 
 		attempts := append([]string{decision.Model}, a.rateLimitFallbacks(decision, hasImageParts(userMessage))...)
 		var result llm.StreamResult
+		var lastErr error
 		for i, name := range attempts {
 			model, _ := a.Catalog.Get(name)
 			if a.needsCompaction(model.ContextWindow) {
@@ -789,8 +794,9 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				}
 			}
 			if i > 0 {
-				a.emit(Event{Kind: EventRoute, Model: name, Router: decision.Router, Reason: "rate limited, next best model"})
-				a.Session.Write(session.Event{Type: "route", Model: name, Router: decision.Router, Reason: "rate limited, next best model", Depth: a.depth, Agent: a.agentName})
+				reason := fallbackReason(lastErr)
+				a.emit(Event{Kind: EventRoute, Model: name, Router: decision.Router, Reason: reason})
+				a.Session.Write(session.Event{Type: "route", Model: name, Router: decision.Router, Reason: reason, Depth: a.depth, Agent: a.agentName})
 			}
 			var deltas int
 			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.toolDefinitions(), func(s string) {
@@ -802,11 +808,15 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				decision.Model = name
 				break
 			}
+			lastErr = err
 			if isAbort(ctx, err) {
 				a.abortTurn(name, &partial, nil)
 				return "", ctx.Err()
 			}
-			if !llm.IsRateLimited(err) || i == len(attempts)-1 {
+			if llm.IsModelUnavailable(err) {
+				a.modelHealth.block(name)
+			}
+			if !(llm.IsRateLimited(err) || llm.IsModelUnavailable(err)) || i == len(attempts)-1 {
 				a.writeSnapshot()
 				a.emitError(err.Error())
 				return "", err
@@ -917,6 +927,9 @@ func (a *Agent) rateLimitFallbacks(decision router.Decision, hasImages bool) []s
 		if len(out) >= rateLimitFallbackCount || tried[name] {
 			return
 		}
+		if a.modelHealth.isBlocked(name) {
+			return
+		}
 		m, ok := a.Catalog.Get(name)
 		if !ok || (hasImages && !m.Vision) {
 			return
@@ -937,6 +950,13 @@ func (a *Agent) rateLimitFallbacks(decision router.Decision, hasImages bool) []s
 		}
 	}
 	return out
+}
+
+func fallbackReason(err error) string {
+	if llm.IsModelUnavailable(err) {
+		return "model unavailable (404), next best model"
+	}
+	return "rate limited, next best model"
 }
 
 func modelsByProbabilityDesc(probs map[string]float64) []string {
@@ -1081,6 +1101,9 @@ func (a *Agent) decide(ctx context.Context, userMessage llm.Message, step int) (
 	}
 	if hasImages {
 		candidates = filterVision(candidates)
+	}
+	if filtered := a.modelHealth.filter(candidates); len(filtered) > 0 {
+		candidates = filtered
 	}
 	decision, err := a.Router.Route(ctx, state, candidates)
 	if err != nil {
