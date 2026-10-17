@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 
 const bashTimeout = 120 * time.Second
 const maxBashOutput = 32 * 1024
+
+var bashWaitDelay = 5 * time.Second
 
 func bashTool(pm *procmon.Manager) Tool {
 	return Tool{
@@ -61,6 +64,7 @@ func runBash(ctx context.Context, args map[string]any, onLine func(string), pm *
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd.WaitDelay = bashWaitDelay
 	var buf bytes.Buffer
 	var w io.Writer = &buf
 	var lw *lineWriter
@@ -81,6 +85,12 @@ func runBash(ctx context.Context, args map[string]any, onLine func(string), pm *
 	if runErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return Result{}, fmt.Errorf("command timed out after %s; output so far:\n%s", bashTimeout, out)
+		}
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			if out == "" {
+				out = "(no output)"
+			}
+			return Result{Output: out + "\n(note: background processes from this command are still running and their later output is discarded — prefer run_in_background for long-running processes)"}, nil
 		}
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			return Result{Output: fmt.Sprintf("exit status %d\n%s", exitErr.ExitCode(), out)}, nil

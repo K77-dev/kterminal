@@ -10,6 +10,26 @@ import (
 	"kterminal/internal/procmon"
 )
 
+func TestBashWaitDelayReturnsDespiteBackgroundStraggler(t *testing.T) {
+	orig := bashWaitDelay
+	bashWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { bashWaitDelay = orig })
+
+	reg := NewRegistry()
+	start := time.Now()
+	res, err := reg.Execute(context.Background(), "bash", `{"command":"sleep 5 & echo ready"}`)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res.Output, "ready") {
+		t.Fatalf("output = %q, want the shell output before the straggler", res.Output)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("elapsed = %s, want well under the 5s straggler sleep: WaitDelay must close the pipes after the shell exits", elapsed)
+	}
+}
+
 func TestBashCanceledContextKillsLongProcess(t *testing.T) {
 	reg := NewRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
