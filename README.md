@@ -1,6 +1,6 @@
 # kterminal
 
-> Um coding agent de terminal em Go, no estilo Claude Code/opencode — com uma mesa de engenharia multi-agente (o **squad mode**) e roteamento de modelo por chamada via **Jev**.
+> Um coding agent de terminal em Go, no estilo Claude Code/opencode — com uma mesa de engenharia multi-agente (o **squad mode**) e roteamento de modelo por chamada via engines selecionáveis (**Jev** ou **Laya**).
 
 ```text
 $ go run .
@@ -23,6 +23,8 @@ $ go run .
   - [Configuração](#configuração)
   - [Personas próprias](#personas-próprias)
   - [FAQ — as perguntas que todo mundo faz](#faq--as-perguntas-que-todo-mundo-faz)
+- [Roteamento de modelo](#roteamento-de-modelo)
+- [Processos em background](#processos-em-background)
 - [Sob o capô](#sob-o-capô)
 - [Comandos](#comandos)
 - [Desenvolvimento](#desenvolvimento)
@@ -33,7 +35,7 @@ $ go run .
 
 Um binário único em Go com uma TUI (Charmbracelet/Bubble Tea) que conversa com LLMs via cliente HTTP próprio (OpenAI-compatible, streaming). O diferencial duplo:
 
-1. **Jev** (roteador externo, Typesafe systemone) escolhe o modelo a **cada chamada**, pesando qualidade, custo e tokens/s **reais medidos** — com fallback heurístico local.
+1. **Roteamento dinâmico** com engine selecionável: o **Jev** (roteador externo, Typesafe systemone) ou a **Laya** (decision engine local) escolhem o modelo a **cada chamada**, pesando qualidade, custo e tokens/s **reais medidos** — com fallback heurístico local.
 2. **Squad mode**: em vez de um agente solitário, uma *mesa* de personas de engenharia que deliberam entre si até convergir num plano — e só então o plano desce para execução.
 
 ## Dois modos de trabalho
@@ -80,7 +82,7 @@ flowchart TD
     A["/mode squad"] --> B["Maestro assume"]
     B --> C["squad_kickoff<br>roles · max_convocations · token_budget · exit_criterion"]
     C --> D["task com persona<br>convoca a próxima persona da mesa"]
-    D --> E["Persona delibera<br>read-only · rules da disciplina · rota Jev própria"]
+    D --> E["Persona delibera<br>read-only · rules da disciplina · rota própria"]
     E --> F["Contribuição + status<br>[mesa: N/M convocations · X/Y tokens]"]
     F --> G["Síntese do maestro<br>acordos · conflitos · dúvidas abertas"]
     G --> H{"Convergiu?<br>critério de saída · consenso · teto de convocações"}
@@ -162,7 +164,7 @@ Cada convocation cria um subagente **recém-nascido**, com memória zerada:
 
 1. **Contexto cirúrgico** — cada persona recebe só o que importa para a disciplina dela (o maestro é instruído a não fazer bundle do contexto inteiro).
 2. **Sem efeito cascata** — uma persona não contaminou a outra; divergências chegam ao maestro, que as explicita na síntese.
-3. **Rota independente** — cada persona tem seu próprio critério no Jev: `architect` pede modelos `reasoning`, `qa` pede `fast`. A mesa inteira não paga o preço do modelo mais caro.
+3. **Rota independente** — cada persona tem seu próprio critério na engine ativa: `architect` pede modelos `reasoning`, `qa` pede `fast`. A mesa inteira não paga o preço do modelo mais caro.
 
 </details>
 
@@ -195,19 +197,27 @@ Na convergência, o maestro entrega um plano com: problema (um parágrafo), deci
 
 ```toml
 # ~/.config/kterminal/config.toml
+[router]
+engine  = "jev"     # "jev" (padrão) ou "laya"
+enabled = true      # false = modelo fixo (picker)
+
 [squad]
 default_mode     = "squad"   # "sdd" (padrão) ou "squad"
 max_convocations = 8         # teto duro de convocações por turno
 token_budget     = 200000    # orçamento consultivo — informativo, nunca bloqueia
 
 [squad.pins]
-architect = "glm-5.3"        # fixa o modelo de uma persona (bypassa o Jev)
+architect = "glm-5.3"        # fixa o modelo de uma persona (bypassa o roteador)
 ```
 
+- `[router] engine`: quem decide o modelo a cada chamada — `jev` (API Typesafe, exige api key) ou `laya` (local).
+- `[router] enabled`: `false` desliga o roteamento dinâmico e usa o `model` fixo do topo da config.
 - `default_mode`: modo inicial de toda sessão.
 - `max_convocations`: máximo **configurável**; o maestro pode declarar menos no kickoff, nunca mais.
 - `token_budget`: valor **default** quando o kickoff não declara um; dali em diante, só informativo.
 - `pins`: override manual de rota por persona.
+
+Overrides por env: `KTERMINAL_ROUTER` (engine), `KTERMINAL_MODEL` (modelo fixo), `KTERMINAL_TYPESAFE_ENABLED`, além dos de LLM (`KTERMINAL_LLM_BASE_URL`, `KTERMINAL_LLM_API_KEY`, timeouts e retries).
 
 ### Personas próprias
 
@@ -228,7 +238,7 @@ alocações, complexidade e custo de algoritmos...
 
 - Uma persona do projeto com o mesmo **nome** de uma embutida a **substitui**.
 - `rules` lista quais rules (de `.agents/rules/`) injetar no prompt — a persona não recebe o bundle inteiro, só o subset da disciplina.
-- `model-tags` entra no critério de rota do Jev para aquela persona.
+- `model-tags` entra no critério de rota da engine ativa para aquela persona.
 
 ---
 
@@ -285,10 +295,48 @@ Não. O modo e a mesa (papéis, statuses, consumo por persona) persistem no snap
 
 ---
 
+## Roteamento de modelo
+
+O kterminal decide o modelo **a cada chamada** — não uma vez por sessão. A engine de decisão é selecionável em runtime:
+
+| Engine | Onde roda | Requer | Comando |
+|---|---|---|---|
+| `jev` (padrão) | API externa Typesafe | `typesafe.api_key` | `/router jev` |
+| `laya` | Local, in-process (ONNX) | artefatos em `~/.config/kterminal/laya/` | `/router laya` |
+| *(desligado)* | — | — | `/router off` → picker de modelo fixo |
+
+```text
+$ kterminal --doctor
+  router engine: jev
+  routing enabled: yes
+  model: auto
+```
+
+- `/router` ou `/router status` — mostra engine ativa, on/off e modelo vigente.
+- `/router on|off` — liga/desliga o roteamento dinâmico; `off` abre o picker de modelo fixo.
+- `/model <nome>` — pina um modelo manualmente (persiste na config, aparece como `⚑` no hint bar) · `/model auto` devolve a decisão à engine.
+- Env override: `KTERMINAL_ROUTER=laya` (mesmo padrão dos demais overrides).
+
+O hint bar mostra o estado: modelo atual (com `⚑` quando pinado), custo da sessão, tokens/s medidos, contador `bg N` e `jev off`/`laya off` quando o roteamento está desligado.
+
+## Processos em background
+
+Comandos longos (dev servers, watchers, builds) não prendem mais o agente:
+
+```json
+{ "command": "bun run dev", "run_in_background": true }
+```
+
+A tool `bash` retorna imediato e o processo segue rodando em grupo próprio (grace de 250ms para falhas de startup). O rodapé mostra `bg N`; o popup **`/bg`** lista os processos com uptime e permite parar cada um individualmente (`↑↓` move, `enter` para, `esc` fecha). Na saída do kterminal — normal, erro ou SIGTERM/SIGINT — todos recebem TERM→KILL com budget de join.
+
+---
+
 ## Sob o capô
 
 <details>
-<summary><strong>Mapa do código do squad mode</strong></summary>
+<summary><strong>Mapa do código</strong></summary>
+
+**Squad mode**
 
 | Caminho | Responsabilidade |
 |---|---|
@@ -297,18 +345,47 @@ Não. O modo e a mesa (papéis, statuses, consumo por persona) persistem no snap
 | `internal/squad/mesa.go` | Estado da mesa: entries, statuses, contadores, status line thread-safe |
 | `internal/squad/embed/maestro.md` | O prompt do maestro (protocolo de kickoff/convocation/convergência) |
 | `internal/squad/embed/personas/*/AGENT.md` | As 7 personas embutidas |
-| `internal/agent/agent.go` | `convokePersona`, `runSubagent` (watchdog, eventos), `task` com parâmetro `persona` |
+| `internal/agent/agent.go` | `convokePersona`, `runSubagent` (watchdog, eventos), `task` com parâmetro `persona`, toolset restrito do maestro |
 | `internal/tools/squad.go` | Tool `squad_kickoff` |
 | `internal/tui/sidebar.go` | Sidebar da mesa (status, modelo, tokens, custo por persona) |
 
-Decisões de projeto: sem novo loop em Go — o squad mode é **prompt-driven** sobre a maquinaria de subagentes existente; assets via `go:embed`; mesa thread-safe (`sync.Mutex`) porque os eventos chegam de goroutines de subagentes.
+**Roteamento**
+
+| Caminho | Responsabilidade |
+|---|---|
+| `internal/router/router.go` | Interface `Router`, `JevRouter`, `LayaRouter`, `HeuristicRouter`, `FixedRouter` |
+| `internal/router/wire.go` | `WireWith` — factory que monta a engine ativa a partir da config |
+| `internal/jev/` | Cliente HTTP do systemone (Typesafe) |
+| `internal/laya/laya.go` | Porta da engine local: `Question`/`Answer`/`Status`, cache em `~/.config/kterminal/laya/` |
+| `internal/agent/health.go` | Blocklist de modelos 404 (`modelHealth`), filtro de candidatos |
+| `internal/telemetry/` | Tokens/s medidos que alimentam o critério de rota |
+
+**Background e infra**
+
+| Caminho | Responsabilidade |
+|---|---|
+| `internal/procmon/` | Manager de processos background: spawn em grupo próprio, watcher, `Stop` TERM→KILL, `KillAll` idempotente |
+| `internal/tools/bash.go` | Tool `bash` com `run_in_background` |
+| `internal/tui/commands.go` | Comandos `/router`, `/model`, `/bg`, popups |
+| `internal/tools/graphify.go` | Tool read-only de consulta ao knowledge graph (`graphify-out/graph.json`) |
+
+Decisões de projeto: sem novo loop em Go — o squad mode é **prompt-driven** sobre a maquinaria de subagentes existente; assets via `go:embed`; mesa thread-safe (`sync.Mutex`) porque os eventos chegam de goroutines de subagentes; engines de rota plugáveis atrás da interface `Router` (o wiring vive em `WireWith`, não no agente).
 
 </details>
 
 <details>
-<summary><strong>Como o Jev roteia cada persona</strong></summary>
+<summary><strong>Como o roteamento funciona</strong></summary>
 
-A cada chamada, o `Router.Route(ctx, state, candidates)` decide o modelo. No squad mode, o `state` carrega o papel da persona e suas `model-tags` entram no `Model.Criteria()` enviado ao Jev — que pesa qualidade, custo e tokens/s reais (telemetria própria). Exemplos: `architect` → tag `reasoning` tende a modelos de raciocínio; `qa` → tag `fast` tende a modelos velozes. Um `pin` por persona (`[squad.pins]`) bypassa o Jev inteiro. Se o Jev cai, o `HeuristicRouter` local assume fazendo keyword-matching do papel.
+A cada chamada, o `Router.Route(ctx, state, candidates)` decide o modelo. A engine ativa (`[router] engine`) determina quem decide:
+
+- **Jev** (`JevRouter`) — API externa da Typesafe (`systemone`), exige `typesafe.api_key`. Pesando qualidade, custo e tokens/s reais (telemetria própria).
+- **Laya** (`LayaRouter`) — decision engine local (ONNX in-process), sem api key. Faz a mesma pergunta tipada (`choice`) com os mesmos critérios do catálogo.
+- **Fixed** (`FixedRouter`) — roteamento desligado (`/router off`): usa o modelo fixo da config.
+- **Heuristic** (`HeuristicRouter`) — fallback local por keyword-matching quando a engine ativa falha.
+
+No squad mode, o `state` carrega o papel da persona e suas `model-tags` entram no `Model.Criteria()` enviado à engine — `architect` → tag `reasoning` tende a modelos de raciocínio; `qa` → tag `fast` tende a modelos velozes. Um `pin` por persona (`[squad.pins]`) bypassa o roteador inteiro; `/model <nome>` pina o modelo da sessão principal (persistente).
+
+Resiliência: um modelo que responde 404 no gateway entra na **blocklist** compartilhada (`modelHealth`) e sai dos candidatos até o fim do processo; em 429, o agente tenta os próximos modelos por probabilidade (`rateLimitFallbacks`) e o retry respeita `Retry-After` com piso de 15s.
 
 </details>
 
@@ -324,16 +401,22 @@ A mesa não vive fora do processo do repo: personas leem artefatos de `spec/` co
 | Comando | Ação |
 |---|---|
 | `/mode` | Alterna entre `sdd` e `squad` (popup) |
-| `/model <nome>` | Pina um modelo manualmente · `/model auto` devolve ao Jev |
+| `/router [status\|jev\|laya\|on\|off]` | Estado do roteamento ou troca de engine |
+| `/model <nome>` | Pina um modelo (persistente) · `/model auto` devolve à engine |
+| `/bg` | Popup de processos em background (parar individualmente) |
+| `/config` | Abre a configuração (gateway, keys, engine, modelo) |
 | `/help` | Lista de comandos |
-| `/config` | Abre a configuração |
-| `/clear`, `/image`, `/exit` | Sessão e anexos |
+| `/clear`, `/image`, `/unimage`, `/exit` | Sessão e anexos |
 
 ## Desenvolvimento
 
 ```bash
 go build ./...                 # build
 go run .                       # rodar em desenvolvimento
+go run . --doctor              # checagens de setup (config, gateway, engine, catálogo, telemetria)
+go run . --continue            # retomar a sessão mais recente
+go run . --session <path>      # retomar um snapshot específico
+go run . --confirm             # pedir confirmação antes de tools mutantes (write/edit/bash)
 go vet ./...                   # análise estática
 gofmt -l .                     # formatação (não deve listar nada)
 go test ./...                  # testes
