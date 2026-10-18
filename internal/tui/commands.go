@@ -10,6 +10,7 @@ import (
 
 	"kterminal/internal/kspec"
 	"kterminal/internal/procmon"
+	"kterminal/internal/router"
 )
 
 const kspecCommandPrefix = "/kspec-"
@@ -18,7 +19,7 @@ const maxHelpLineRunes = 72
 const kspecKickoffPrefix = "Begin the "
 const kspecKickoffSuffix = " workflow now."
 
-var nativeCommands = []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
+var nativeCommands = []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/unimage"}
 
 var modeOptions = []string{"sdd", "squad"}
 
@@ -362,57 +363,118 @@ func (m Model) modelPopupView() string {
 	return mentionPopupStyle.Render(b.String())
 }
 
-func (m Model) handleJevCommand(arg string) (tea.Model, tea.Cmd) {
-	switch arg {
-	case "":
-		return m.showJevStatus()
-	case "on":
-		return m.enableJev()
-	case "off":
-		return m.applyJevState(false)
+func (m Model) handleRouterCommand(arg string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(arg)
+	switch {
+	case len(parts) == 0 || (len(parts) == 1 && parts[0] == "status"):
+		return m.showRouterStatus()
+	case len(parts) == 1 && parts[0] == "jev":
+		return m.switchRouterEngine(router.EngineJev)
+	case len(parts) == 1 && parts[0] == "laya":
+		return m.switchRouterEngine(router.EngineLaya)
+	case len(parts) == 1 && parts[0] == "on":
+		return m.enableRouter()
+	case len(parts) == 1 && parts[0] == "off":
+		return m.applyRouterState(false)
 	default:
-		m.blocks = append(m.blocks, errorBox("unknown jev state "+arg+" — /jev on or /jev off"))
+		m.blocks = append(m.blocks, errorBox("unknown router command "+strings.Join(parts, " ")+" — /router [status|jev|laya|on|off]"))
 		m.refreshContent()
 		return m, nil
 	}
 }
 
-func (m Model) showJevStatus() (tea.Model, tea.Cmd) {
+func (m Model) showRouterStatus() (tea.Model, tea.Cmd) {
+	engine := m.cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
 	state := "off"
-	if m.cfg.Typesafe.JevEnabled() && m.cfg.Typesafe.APIKey != "" {
+	if m.cfg.Router.RoutingEnabled() && m.routerEngineReady(engine) {
 		state = "on"
 	}
 	model := m.cfg.Model
 	if model == "" {
 		model = m.catalog.DefaultModel
 	}
-	m.blocks = append(m.blocks, resultStyle.Render("jev: "+state+"\nmodel: "+model))
+	m.blocks = append(m.blocks, resultStyle.Render("engine: "+engine+"\nrouter: "+state+"\nmodel: "+model))
 	m.refreshContent()
 	return m, nil
 }
 
-func (m Model) enableJev() (tea.Model, tea.Cmd) {
-	if m.cfg.Typesafe.APIKey == "" {
+func (m Model) routerEngineReady(engine string) bool {
+	switch engine {
+	case router.EngineLaya:
+		return m.laya != nil
+	default:
+		return m.cfg.Typesafe.APIKey != ""
+	}
+}
+
+func (m Model) switchRouterEngine(engine string) (tea.Model, tea.Cmd) {
+	if engine == router.EngineLaya && m.laya == nil {
+		m.blocks = append(m.blocks, errorBox("laya engine ainda não disponível"))
+		m.refreshContent()
+		return m, nil
+	}
+	if engine == router.EngineJev && m.cfg.Typesafe.APIKey == "" {
 		m.blocks = append(m.blocks, errorBox("jev needs a typesafe api key — set one in /config"))
 		m.refreshContent()
 		return m, nil
 	}
-	return m.applyJevState(true)
-}
-
-func (m Model) applyJevState(enabled bool) (tea.Model, tea.Cmd) {
-	previous := m.cfg.Typesafe.Enabled
-	m.cfg.Typesafe.Enabled = &enabled
+	previousEngine := m.cfg.Router.Engine
+	previousEnabled := m.cfg.Router.Enabled
+	enabled := true
+	m.cfg.Router.Engine = engine
+	m.cfg.Router.Enabled = &enabled
 	if err := m.cfg.Save(); err != nil {
-		m.cfg.Typesafe.Enabled = previous
+		m.cfg.Router.Engine = previousEngine
+		m.cfg.Router.Enabled = previousEnabled
 		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
 		m.refreshContent()
 		return m, nil
 	}
 	m.rebuildAgent()
-	label := "jev off"
+	m.blocks = append(m.blocks, primaryStyle.Render("engine "+engine+" · router on"))
+	m.blocks = append(m.blocks, resultStyle.Render("config saved"))
+	m.refreshContent()
+	return m, nil
+}
+
+func (m Model) enableRouter() (tea.Model, tea.Cmd) {
+	engine := m.cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
+	if !m.routerEngineReady(engine) {
+		switch engine {
+		case router.EngineLaya:
+			m.blocks = append(m.blocks, errorBox("laya engine ainda não disponível"))
+		default:
+			m.blocks = append(m.blocks, errorBox("jev needs a typesafe api key — set one in /config"))
+		}
+		m.refreshContent()
+		return m, nil
+	}
+	return m.applyRouterState(true)
+}
+
+func (m Model) applyRouterState(enabled bool) (tea.Model, tea.Cmd) {
+	previous := m.cfg.Router.Enabled
+	m.cfg.Router.Enabled = &enabled
+	if err := m.cfg.Save(); err != nil {
+		m.cfg.Router.Enabled = previous
+		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
+		m.refreshContent()
+		return m, nil
+	}
+	m.rebuildAgent()
+	engine := m.cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
+	label := engine + " off"
 	if enabled {
-		label = "jev on"
+		label = engine + " on"
 	}
 	m.blocks = append(m.blocks, primaryStyle.Render(label))
 	m.blocks = append(m.blocks, resultStyle.Render("config saved"))

@@ -23,6 +23,7 @@ import (
 	"kterminal/internal/clipboard"
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
+	"kterminal/internal/laya"
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
 	"kterminal/internal/router"
@@ -79,6 +80,7 @@ type Model struct {
 	catalog    *catalog.Catalog
 	kspecStore *kspec.Store
 	procMon    *procmon.Manager
+	laya       laya.Engine
 
 	state  string
 	vp     viewport.Model
@@ -171,6 +173,12 @@ func WithKspec(s *kspec.Store) Option {
 func WithProcMon(pm *procmon.Manager) Option {
 	return func(m *Model) {
 		m.procMon = pm
+	}
+}
+
+func WithLaya(e laya.Engine) Option {
+	return func(m *Model) {
+		m.laya = e
 	}
 }
 
@@ -289,7 +297,16 @@ func newConfigInputs(cfg *config.Config) []textinput.Model {
 	model.SetValue(cfg.Model)
 	model.CharLimit = 0
 
-	return []textinput.Model{url, llmKey, jevKey, skipTLS, jevEnabled, model}
+	engine := textinput.New()
+	engine.Placeholder = "jev/laya"
+	activeEngine := cfg.Router.Engine
+	if activeEngine == "" {
+		activeEngine = "jev"
+	}
+	engine.SetValue(activeEngine)
+	engine.CharLimit = 4
+
+	return []textinput.Model{url, llmKey, jevKey, skipTLS, jevEnabled, model, engine}
 }
 
 func boolToYesNo(b bool) string {
@@ -1103,8 +1120,8 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 	case "/help":
 		lines := []string{
 			"/config — configure gateway and API keys",
-			"/jev on|off — toggle Jev routing · /jev — show state",
-			"/model <name> — pin a model, persisted across restarts · /model auto — let Jev decide",
+			"/router [status|jev|laya|on|off] — show state or switch the routing engine",
+			"/model <name> — pin a model, persisted across restarts · /model auto — let the router decide",
 			"/mode — switch between sdd and squad modes",
 			"/bg — background processes",
 			"/image <path> — attach an image · /image — list pending · /unimage <n> — remove",
@@ -1139,8 +1156,8 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		m.cfgInputs[0].Focus()
 		m.state = stateConfig
 		return m, nil
-	case "/jev":
-		return m.handleJevCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
+	case "/router":
+		return m.handleRouterCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
 	case "/mode":
 		m.openModePopup()
 		return m, nil
@@ -1336,6 +1353,15 @@ func (m Model) saveConfig() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	engine := strings.TrimSpace(m.cfgInputs[6].Value())
+	if engine != "" && engine != router.EngineJev && engine != router.EngineLaya {
+		m.cfgError = "unknown router engine " + engine + " — jev or laya"
+		return m, nil
+	}
+	if engine == router.EngineLaya && m.laya == nil {
+		m.cfgError = "laya engine ainda não disponível"
+		return m, nil
+	}
 	m.cfgError = ""
 	enabled := yesNoToBool(m.cfgInputs[4].Value())
 	m.cfg.LLM.BaseURL = strings.TrimSpace(m.cfgInputs[0].Value())
@@ -1344,6 +1370,9 @@ func (m Model) saveConfig() (tea.Model, tea.Cmd) {
 	m.cfg.LLM.SkipTLSVerify = yesNoToBool(m.cfgInputs[3].Value())
 	m.cfg.Typesafe.Enabled = &enabled
 	m.cfg.Model = model
+	if engine != "" {
+		m.cfg.Router.Engine = engine
+	}
 	if err := m.cfg.Save(); err != nil {
 		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
 	} else {
@@ -1366,7 +1395,18 @@ func (m *Model) rebuildAgent() {
 			MaxRetries:       m.cfg.LLM.MaxRetries,
 		})
 	}
-	primary, fallback := router.Wire(m.cfg.Typesafe.APIKey, m.cfg.Typesafe.JevEnabled(), m.cfg.Model, m.catalog)
+	primary, fallback, err := router.WireWith(router.Options{
+		Engine:     m.cfg.Router.Engine,
+		Enabled:    m.cfg.Router.RoutingEnabled(),
+		JevAPIKey:  m.cfg.Typesafe.APIKey,
+		JevEnabled: m.cfg.Typesafe.JevEnabled(),
+		FixedModel: m.cfg.Model,
+		Laya:       m.laya,
+	}, m.catalog)
+	if err != nil {
+		primary = &router.FixedRouter{Model: m.cfg.Model, Default: m.catalog.DefaultModel}
+		fallback = nil
+	}
 	m.agent.SetLLM(llmClient)
 	m.agent.SetRouters(primary, fallback)
 	m.agent.SetPinned(m.cfg.Model)
@@ -1479,6 +1519,11 @@ func (m Model) emptyState() string {
 	var b strings.Builder
 	b.WriteString(renderLogo())
 	b.WriteString("\n\n")
+	engine := m.cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
+	routerName := "The " + engine + " router"
 	if !m.cfg.Ready() {
 		b.WriteString(textStyle.Render("No gateway connected."))
 		b.WriteString("\n")
@@ -1486,9 +1531,9 @@ func (m Model) emptyState() string {
 		b.WriteString(primaryStyle.Render("/config"))
 		b.WriteString(helpStyle.Render(" to set a base URL and API keys."))
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Jev will pick the best model for every single call."))
+		b.WriteString(helpStyle.Render(routerName + " will pick the best model for every single call."))
 	} else {
-		b.WriteString(textStyle.Render("Jev weighs quality, cost and measured speed — then picks the model for every single call."))
+		b.WriteString(textStyle.Render(routerName + " weighs quality, cost and measured speed — then picks the model for every single call."))
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("no model picking · "))
 		b.WriteString(primaryStyle.Render("/help"))
@@ -1526,8 +1571,8 @@ func (m Model) hintBar() string {
 	if n := m.bgCount(); n > 0 {
 		segments = append(segments, primaryStyle.Render(fmt.Sprintf("bg %d", n)))
 	}
-	if !m.cfg.Typesafe.JevEnabled() || m.cfg.Typesafe.APIKey == "" {
-		segments = append(segments, warningStyle.Render("jev off"))
+	if seg := m.routingStatusSegment(); seg != "" {
+		segments = append(segments, seg)
 	}
 	model := m.currentModel
 	if model == "" {
@@ -1552,6 +1597,17 @@ func (m Model) hintBar() string {
 		gap = 1
 	}
 	return strings.Repeat(" ", chatInset) + left + strings.Repeat(" ", gap) + right
+}
+
+func (m Model) routingStatusSegment() string {
+	engine := m.cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
+	if m.cfg.Router.RoutingEnabled() && m.routerEngineReady(engine) {
+		return ""
+	}
+	return warningStyle.Render(engine + " off")
 }
 
 func maxInt(a, b int) int {
@@ -1646,7 +1702,7 @@ func (m Model) promptDeckView() string {
 }
 
 func (m Model) configView() string {
-	labels := []string{"LiteLLM base URL", "LiteLLM API key", "Typesafe (Jev) API key", "Skip TLS verification (yes/no)", "Jev enabled (yes/no)", "Model"}
+	labels := []string{"LiteLLM base URL", "LiteLLM API key", "Typesafe (Jev) API key", "Skip TLS verification (yes/no)", "Jev enabled (yes/no)", "Model", "Router engine (jev/laya)"}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("CONFIG"))
 	b.WriteString("\n\n")

@@ -90,7 +90,18 @@ func main() {
 			MaxRetries:       cfg.LLM.MaxRetries,
 		})
 	}
-	primary, fallback := router.Wire(cfg.Typesafe.APIKey, cfg.Typesafe.JevEnabled(), cfg.Model, cat)
+	primary, fallback, wireErr := router.WireWith(router.Options{
+		Engine:     cfg.Router.Engine,
+		Enabled:    cfg.Router.RoutingEnabled(),
+		JevAPIKey:  cfg.Typesafe.APIKey,
+		JevEnabled: cfg.Typesafe.JevEnabled(),
+		FixedModel: cfg.Model,
+	}, cat)
+	if wireErr != nil {
+		fmt.Fprintln(os.Stderr, "kterminal: router:", wireErr, "— falling back to the fixed model")
+		primary = &router.FixedRouter{Model: cfg.Model, Default: cat.DefaultModel}
+		fallback = nil
+	}
 
 	pm := procmon.New()
 	reg := tools.NewRegistry()
@@ -282,11 +293,16 @@ func validateModel(model string, cat *catalog.Catalog) error {
 
 func doctorRoutingLines(cfg *config.Config) string {
 	var b strings.Builder
+	engine := cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
 	enabled := "no"
-	if cfg.Typesafe.JevEnabled() {
+	if cfg.Router.RoutingEnabled() {
 		enabled = "yes"
 	}
-	fmt.Fprintf(&b, "  jev enabled: %s\n", enabled)
+	fmt.Fprintf(&b, "  router engine: %s\n", engine)
+	fmt.Fprintf(&b, "  routing enabled: %s\n", enabled)
 	model := cfg.Model
 	if model == "" {
 		model = "auto"
@@ -297,6 +313,18 @@ func doctorRoutingLines(cfg *config.Config) string {
 
 func doctorJevSection(cfg *config.Config, baseURL string) (string, bool) {
 	var b strings.Builder
+	engine := cfg.Router.Engine
+	if engine == "" {
+		engine = router.EngineJev
+	}
+	if !cfg.Router.RoutingEnabled() {
+		fmt.Fprintln(&b, "router: disabled")
+		return b.String(), true
+	}
+	if engine != router.EngineJev {
+		fmt.Fprintf(&b, "jev: skipped — active engine is %s\n", engine)
+		return b.String(), true
+	}
 	if !cfg.Typesafe.JevEnabled() {
 		fmt.Fprintln(&b, "jev: disabled")
 		return b.String(), true

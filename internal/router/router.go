@@ -8,6 +8,7 @@ import (
 
 	"kterminal/internal/catalog"
 	"kterminal/internal/jev"
+	"kterminal/internal/laya"
 )
 
 type Decision struct {
@@ -65,6 +66,51 @@ func (r *JevRouter) Route(ctx context.Context, state string, candidates []catalo
 		return Decision{}, fmt.Errorf("jev chose unknown model %q", choice)
 	}
 	return Decision{Model: choice, Confidence: confidence, Probabilities: probs, Router: "jev"}, nil
+}
+
+type predictor interface {
+	Predict(ctx context.Context, state string, questions map[string]laya.Question) (map[string]laya.Answer, error)
+}
+
+type LayaRouter struct {
+	Engine predictor
+}
+
+func (r *LayaRouter) Route(ctx context.Context, state string, candidates []catalog.Model) (Decision, error) {
+	if len(candidates) == 0 {
+		return Decision{}, fmt.Errorf("no candidate models")
+	}
+	if len(candidates) == 1 {
+		return Decision{Model: candidates[0].Name, Confidence: 1, Router: "laya", Reason: "single candidate"}, nil
+	}
+	criteria := map[string]string{}
+	for _, m := range candidates {
+		criteria[m.Name] = m.Criteria()
+	}
+	answers, err := r.Engine.Predict(ctx, state, map[string]laya.Question{
+		"model_choice": {Type: laya.QuestionTypeChoice, Instructions: instructions, Criteria: criteria},
+	})
+	if err != nil {
+		return Decision{}, err
+	}
+	ans, ok := answers["model_choice"]
+	if !ok {
+		return Decision{}, fmt.Errorf("laya response missing model_choice answer")
+	}
+	if ans.Choice == "" {
+		return Decision{}, fmt.Errorf("laya returned empty choice")
+	}
+	valid := false
+	for _, m := range candidates {
+		if m.Name == ans.Choice {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return Decision{}, fmt.Errorf("laya chose unknown model %q", ans.Choice)
+	}
+	return Decision{Model: ans.Choice, Confidence: ans.Confidence, Probabilities: ans.Probabilities, Router: "laya"}, nil
 }
 
 type HeuristicRouter struct {
@@ -138,8 +184,12 @@ func (r *FixedRouter) Route(_ context.Context, _ string, candidates []catalog.Mo
 }
 
 func Wire(apiKey string, jevEnabled bool, fixedModel string, cat *catalog.Catalog) (Router, Router) {
-	if jevEnabled && apiKey != "" {
-		return NewJev(jev.New(apiKey)), &HeuristicRouter{Default: cat.DefaultModel}
-	}
-	return &FixedRouter{Model: fixedModel, Default: cat.DefaultModel}, nil
+	primary, fallback, _ := WireWith(Options{
+		Engine:     EngineJev,
+		Enabled:    true,
+		JevAPIKey:  apiKey,
+		JevEnabled: jevEnabled,
+		FixedModel: fixedModel,
+	}, cat)
+	return primary, fallback
 }

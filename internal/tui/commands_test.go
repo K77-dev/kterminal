@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"kterminal/internal/catalog"
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
+	"kterminal/internal/laya"
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
 	"kterminal/internal/router"
@@ -448,7 +450,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected command popup open after typing /")
 	}
-	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/router", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -527,7 +529,7 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected popup open after typing /")
 	}
-	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/jev", "/mode", "/model", "/quit", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -1351,7 +1353,7 @@ func countingJev(t *testing.T, choice string, hits *atomic.Int32) *httptest.Serv
 	return srv
 }
 
-func TestJevOnWithoutAPIKeyKeepsConfig(t *testing.T) {
+func TestRouterJevOnWithoutAPIKeyKeepsConfig(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -1364,17 +1366,20 @@ func TestJevOnWithoutAPIKeyKeepsConfig(t *testing.T) {
 	}
 	routerBefore := ag.Router
 
-	m = runCommand(t, m, "/jev on")
+	m = runCommand(t, m, "/router on")
 
 	after, err := os.ReadFile(config.Path())
 	if err != nil {
-		t.Fatalf("read config after /jev on: %v", err)
+		t.Fatalf("read config after /router on: %v", err)
 	}
 	if string(before) != string(after) {
 		t.Fatalf("config file must stay unchanged:\nbefore: %q\nafter:  %q", string(before), string(after))
 	}
-	if ag.Router != routerBefore {
-		t.Fatalf("router must stay %T, got %T", routerBefore, ag.Router)
+	if ag.Router == nil || routerBefore == nil {
+		t.Fatalf("routers must stay non-nil: %T / %T", ag.Router, routerBefore)
+	}
+	if _, ok := ag.Router.(*router.FixedRouter); !ok {
+		t.Fatalf("router must stay *router.FixedRouter, got %T", ag.Router)
 	}
 	plain := stripANSI(m.contentRaw)
 	if !strings.Contains(plain, "jev needs a typesafe api key") {
@@ -1385,23 +1390,23 @@ func TestJevOnWithoutAPIKeyKeepsConfig(t *testing.T) {
 	}
 }
 
-func TestJevOffPersistsAndOpensPicker(t *testing.T) {
+func TestRouterOffPersistsAndOpensPicker(t *testing.T) {
 	gw, _ := captureGateway(t)
 	var hits atomic.Int32
 	jevSrv := countingJev(t, "glm-5.2", &hits)
 	m, ag := newJevCommandModel(t, gw.URL, jevSrv.URL, "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 
 	if !m.modelOpen {
-		t.Fatal("/jev off must open the model picker")
+		t.Fatal("/router off must open the model picker")
 	}
-	if m.cfg.Typesafe.JevEnabled() {
-		t.Fatal("enabled must be false in memory after /jev off")
+	if m.cfg.Router.RoutingEnabled() {
+		t.Fatal("routing must be disabled in memory after /router off")
 	}
 	if _, ok := ag.Router.(*router.FixedRouter); !ok {
-		t.Fatalf("router = %T, want *router.FixedRouter after /jev off", ag.Router)
+		t.Fatalf("router = %T, want *router.FixedRouter after /router off", ag.Router)
 	}
 	if ag.Fallback != nil {
 		t.Fatalf("fallback = %T, want nil with the fixed router", ag.Fallback)
@@ -1410,8 +1415,8 @@ func TestJevOffPersistsAndOpensPicker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if reloaded.Typesafe.JevEnabled() {
-		t.Fatal("enabled = false must survive a restart")
+	if reloaded.Router.RoutingEnabled() {
+		t.Fatal("routing disabled must survive a restart")
 	}
 	plain := stripANSI(m.contentRaw)
 	if !strings.Contains(plain, "jev off") || !strings.Contains(plain, "config saved") {
@@ -1419,7 +1424,7 @@ func TestJevOffPersistsAndOpensPicker(t *testing.T) {
 	}
 }
 
-func TestJevOffStopsJevRequestsInNextTurn(t *testing.T) {
+func TestRouterOffStopsJevRequestsInNextTurn(t *testing.T) {
 	gw, _ := captureGateway(t)
 	var hits atomic.Int32
 	jevSrv := countingJev(t, "glm-5.2", &hits)
@@ -1439,17 +1444,17 @@ func TestJevOffStopsJevRequestsInNextTurn(t *testing.T) {
 		t.Fatal("precondition: the jev mock must have been called at least once")
 	}
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.modelOpen {
-		t.Fatal("esc must close the picker opened by /jev off")
+		t.Fatal("esc must close the picker opened by /router off")
 	}
 
 	m.input.SetValue("second question")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	route = waitForAgentEvent(t, ag.Events, agent.EventRoute)
 	if route.Router != "fixed" {
-		t.Fatalf("turn after /jev off must route via fixed, got %q", route.Router)
+		t.Fatalf("turn after /router off must route via fixed, got %q", route.Router)
 	}
 	if route.Model != m.catalog.DefaultModel {
 		t.Fatalf("model = %q, want the catalog default %q (esc keeps auto)", route.Model, m.catalog.DefaultModel)
@@ -1457,16 +1462,16 @@ func TestJevOffStopsJevRequestsInNextTurn(t *testing.T) {
 	done = waitForAgentEvent(t, ag.Events, agent.EventTurnDone)
 	m = step(t, m, agentEventMsg{event: done})
 	if got := hits.Load(); got != hitsAfterFirst {
-		t.Fatalf("jev mock hits = %d, want %d (no requests after /jev off)", got, hitsAfterFirst)
+		t.Fatalf("jev mock hits = %d, want %d (no requests after /router off)", got, hitsAfterFirst)
 	}
 }
 
-func TestJevOffThenModelCommandPersistsBothFields(t *testing.T) {
+func TestRouterOffThenModelCommandPersistsBothFields(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	m = runCommand(t, m, "/model glm-5.3")
 
@@ -1474,8 +1479,8 @@ func TestJevOffThenModelCommandPersistsBothFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if reloaded.Typesafe.JevEnabled() {
-		t.Fatal("enabled = false must survive /jev off followed by /model")
+	if reloaded.Router.RoutingEnabled() {
+		t.Fatal("routing disabled must survive /router off followed by /model")
 	}
 	if reloaded.Model != "glm-5.3" {
 		t.Fatalf("reloaded model = %q, want glm-5.3 (both fields must survive a restart)", reloaded.Model)
@@ -1484,28 +1489,28 @@ func TestJevOffThenModelCommandPersistsBothFields(t *testing.T) {
 		t.Fatalf("pinned = %q, want glm-5.3", got)
 	}
 	if _, ok := ag.Router.(*router.FixedRouter); !ok {
-		t.Fatalf("router = %T, want *router.FixedRouter after /jev off + /model", ag.Router)
+		t.Fatalf("router = %T, want *router.FixedRouter after /router off + /model", ag.Router)
 	}
 	if ag.Fallback != nil {
 		t.Fatalf("fallback = %T, want nil with Jev disabled", ag.Fallback)
 	}
 }
 
-func TestJevOnReinstallsJevRouter(t *testing.T) {
+func TestRouterOnReinstallsActiveEngineRouter(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if _, ok := ag.Router.(*router.FixedRouter); !ok {
-		t.Fatalf("precondition: router = %T, want *router.FixedRouter after /jev off", ag.Router)
+		t.Fatalf("precondition: router = %T, want *router.FixedRouter after /router off", ag.Router)
 	}
 
-	m = runCommand(t, m, "/jev on")
+	m = runCommand(t, m, "/router on")
 
 	if _, ok := ag.Router.(*router.JevRouter); !ok {
-		t.Fatalf("router = %T, want *router.JevRouter reinstalled by /jev on", ag.Router)
+		t.Fatalf("router = %T, want *router.JevRouter reinstalled by /router on", ag.Router)
 	}
 	if _, ok := ag.Fallback.(*router.HeuristicRouter); !ok {
 		t.Fatalf("fallback = %T, want *router.HeuristicRouter with Jev on", ag.Fallback)
@@ -1514,8 +1519,8 @@ func TestJevOnReinstallsJevRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if !reloaded.Typesafe.JevEnabled() {
-		t.Fatal("enabled = true must be persisted by /jev on")
+	if !reloaded.Router.RoutingEnabled() {
+		t.Fatal("routing enabled must be persisted by /router on")
 	}
 	plain := stripANSI(m.contentRaw)
 	if !strings.Contains(plain, "jev on") || !strings.Contains(plain, "config saved") {
@@ -1523,86 +1528,86 @@ func TestJevOnReinstallsJevRouter(t *testing.T) {
 	}
 }
 
-func TestJevOffIdempotent(t *testing.T) {
+func TestRouterOffIdempotent(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 
 	if !m.modelOpen {
-		t.Fatal("second /jev off must open the picker again")
+		t.Fatal("second /router off must open the picker again")
 	}
 	if _, ok := ag.Router.(*router.FixedRouter); !ok {
-		t.Fatalf("router = %T, want *router.FixedRouter after the second /jev off", ag.Router)
+		t.Fatalf("router = %T, want *router.FixedRouter after the second /router off", ag.Router)
 	}
 	reloaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if reloaded.Typesafe.JevEnabled() {
-		t.Fatal("enabled must stay false after the second /jev off")
+	if reloaded.Router.RoutingEnabled() {
+		t.Fatal("routing must stay disabled after the second /router off")
 	}
 	plain := stripANSI(m.contentRaw)
 	if strings.Contains(plain, "failed to save config") {
-		t.Fatalf("idempotent /jev off must not error:\n%s", plain)
+		t.Fatalf("idempotent /router off must not error:\n%s", plain)
 	}
 	if !strings.Contains(plain, "config saved") {
 		t.Fatalf("chat missing the save confirmation:\n%s", plain)
 	}
 }
 
-func TestJevStatusShowsStateAndModel(t *testing.T) {
+func TestRouterStatusShowsStateAndModel(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev")
+	m = runCommand(t, m, "/router")
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, "jev: on") {
-		t.Fatalf("status must show jev on with a key:\n%s", plain)
+	if !strings.Contains(plain, "engine: jev") || !strings.Contains(plain, "router: on") {
+		t.Fatalf("status must show engine jev on with a key:\n%s", plain)
 	}
 	if !strings.Contains(plain, "model: "+m.catalog.DefaultModel) {
 		t.Fatalf("status must show the catalog default as the fixed model:\n%s", plain)
 	}
 
 	m = runCommand(t, m, "/model glm-5.3")
-	m = runCommand(t, m, "/jev")
+	m = runCommand(t, m, "/router")
 	plain = stripANSI(m.contentRaw)
 	if !strings.Contains(plain, "model: glm-5.3") {
 		t.Fatalf("status must show the configured fixed model:\n%s", plain)
 	}
 
-	m = runCommand(t, m, "/jev off")
+	m = runCommand(t, m, "/router off")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	m = runCommand(t, m, "/jev")
+	m = runCommand(t, m, "/router")
 	plain = stripANSI(m.contentRaw)
-	if !strings.Contains(plain, "jev: off") {
-		t.Fatalf("status must show jev off after /jev off:\n%s", plain)
+	if !strings.Contains(plain, "router: off") {
+		t.Fatalf("status must show router off after /router off:\n%s", plain)
 	}
 
 	m2, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "")
 	m2 = step(t, m2, tea.WindowSizeMsg{Width: 100, Height: 30})
-	m2 = runCommand(t, m2, "/jev")
-	if plain := stripANSI(m2.contentRaw); !strings.Contains(plain, "jev: off") {
-		t.Fatalf("status must show jev off without an api key:\n%s", plain)
+	m2 = runCommand(t, m2, "/router")
+	if plain := stripANSI(m2.contentRaw); !strings.Contains(plain, "router: off") {
+		t.Fatalf("status must show router off without an api key:\n%s", plain)
 	}
 }
 
-func TestJevUnknownStateErrors(t *testing.T) {
+func TestRouterUnknownStateErrors(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	m = runCommand(t, m, "/jev toggle")
+	m = runCommand(t, m, "/router toggle")
 
 	if _, err := os.Stat(config.Path()); err == nil {
 		t.Fatal("unknown state must not persist the config file")
 	}
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, "unknown jev state toggle") {
+	if !strings.Contains(plain, "unknown router command toggle") {
 		t.Fatalf("chat missing the unknown state error:\n%s", plain)
 	}
 }
@@ -1643,8 +1648,8 @@ func TestConfigInvalidModelKeepsScreenAndFile(t *testing.T) {
 	if m.state != stateConfig {
 		t.Fatalf("state = %q, want config", m.state)
 	}
-	if len(m.cfgInputs) != 6 {
-		t.Fatalf("inputs = %d, want 6", len(m.cfgInputs))
+	if len(m.cfgInputs) != 7 {
+		t.Fatalf("inputs = %d, want 7", len(m.cfgInputs))
 	}
 	if got := m.cfgInputs[4].Value(); got != "yes" {
 		t.Fatalf("jev enabled input = %q, want yes (default)", got)
@@ -1865,29 +1870,155 @@ func TestLegacyConfigKeepsJevActiveEndToEnd(t *testing.T) {
 	}
 }
 
-func TestHelpDocumentsJevAndPersistentModel(t *testing.T) {
+func TestHelpDocumentsRouterAndPersistentModel(t *testing.T) {
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = runCommand(t, m, "/help")
 
 	plain := stripANSI(m.contentRaw)
-	if !strings.Contains(plain, "/jev on|off — toggle Jev routing") {
-		t.Fatalf("help missing the /jev line:\n%s", plain)
+	if !strings.Contains(plain, "/router [status|jev|laya|on|off]") {
+		t.Fatalf("help missing the /router line:\n%s", plain)
 	}
 	if !strings.Contains(plain, "persisted across restarts") {
 		t.Fatalf("help missing the persistent /model description:\n%s", plain)
 	}
 }
 
-func TestCommandPopupSuggestsJev(t *testing.T) {
+func TestCommandPopupSuggestsRouter(t *testing.T) {
 	m := newTestModel(t)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/je")})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/ro")})
 
 	if !m.cmdOpen {
-		t.Fatal("expected popup open for /je")
+		t.Fatal("expected popup open for /ro")
 	}
-	if strings.Join(m.cmdItems, "|") != "/jev" {
-		t.Fatalf("items = %v, want [/jev]", m.cmdItems)
+	if strings.Join(m.cmdItems, "|") != "/router" {
+		t.Fatalf("items = %v, want [/router]", m.cmdItems)
+	}
+}
+
+func TestRouterLayaWithoutEngineKeepsConfig(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if err := m.cfg.Save(); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	before, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+
+	m = runCommand(t, m, "/router laya")
+
+	after, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatalf("read config after /router laya: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("config must stay unchanged without the laya engine:\nbefore: %q\nafter:  %q", string(before), string(after))
+	}
+	if m.cfg.Router.Engine != "jev" {
+		t.Fatalf("engine = %q, want jev untouched", m.cfg.Router.Engine)
+	}
+	if _, ok := ag.Router.(*router.JevRouter); !ok {
+		t.Fatalf("router = %T, want *router.JevRouter untouched", ag.Router)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "laya engine ainda não disponível") {
+		t.Fatalf("chat missing the laya unavailable error:\n%s", plain)
+	}
+	if strings.Contains(plain, "config saved") {
+		t.Fatalf("chat must not confirm a save:\n%s", plain)
+	}
+}
+
+type stubLayaEngine struct{}
+
+func (stubLayaEngine) Predict(context.Context, string, map[string]laya.Question) (map[string]laya.Answer, error) {
+	return nil, errors.New("no inference in this stub")
+}
+
+func (stubLayaEngine) Status() laya.Status { return laya.Status{Ready: true} }
+
+func (stubLayaEngine) EnsureReady(context.Context, func(laya.Progress)) error { return nil }
+
+func TestRouterLayaWithEngineSwitchesAndPersists(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.laya = stubLayaEngine{}
+
+	m = runCommand(t, m, "/router laya")
+
+	if m.cfg.Router.Engine != "laya" {
+		t.Fatalf("engine = %q, want laya", m.cfg.Router.Engine)
+	}
+	if _, ok := ag.Router.(*router.LayaRouter); !ok {
+		t.Fatalf("router = %T, want *router.LayaRouter after the switch", ag.Router)
+	}
+	if _, ok := ag.Fallback.(*router.HeuristicRouter); !ok {
+		t.Fatalf("fallback = %T, want *router.HeuristicRouter with laya active", ag.Fallback)
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Router.Engine != "laya" {
+		t.Fatalf("reloaded engine = %q, want laya persisted", reloaded.Router.Engine)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "engine laya · router on") || !strings.Contains(plain, "config saved") {
+		t.Fatalf("chat missing the switch confirmation:\n%s", plain)
+	}
+
+	m = runCommand(t, m, "/router jev")
+	if m.cfg.Router.Engine != "jev" {
+		t.Fatalf("engine = %q, want jev after switching back", m.cfg.Router.Engine)
+	}
+	if _, ok := ag.Router.(*router.JevRouter); !ok {
+		t.Fatalf("router = %T, want *router.JevRouter after switching back", ag.Router)
+	}
+	reloaded, err = config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Router.Engine != "jev" {
+		t.Fatalf("reloaded engine = %q, want jev persisted", reloaded.Router.Engine)
+	}
+}
+
+func TestRouterOnWithLayaEngineNeedsEngineInstalled(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newJevCommandModel(t, gw.URL, "http://jev.unused", "jev-key")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.cfg.Router.Engine = "laya"
+
+	m = runCommand(t, m, "/router on")
+
+	if m.cfg.Router.RoutingEnabled() != true {
+		t.Fatal("precondition broken")
+	}
+	if _, ok := ag.Router.(*router.JevRouter); !ok {
+		t.Fatalf("router = %T, must stay untouched when laya is not installed", ag.Router)
+	}
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "laya engine ainda não disponível") {
+		t.Fatalf("chat missing the laya unavailable error:\n%s", plain)
+	}
+}
+
+func TestRouterStatusShowsLayaEngine(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, _ := newJevCommandModel(t, gw.URL, "http://jev.unused", "")
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.laya = stubLayaEngine{}
+	m.cfg.Router.Engine = "laya"
+
+	m = runCommand(t, m, "/router")
+
+	plain := stripANSI(m.contentRaw)
+	if !strings.Contains(plain, "engine: laya") || !strings.Contains(plain, "router: on") {
+		t.Fatalf("status must show engine laya on with the engine installed:\n%s", plain)
 	}
 }

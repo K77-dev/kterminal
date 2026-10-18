@@ -25,6 +25,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
+	"kterminal/internal/router"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
 	"kterminal/internal/tools"
@@ -1015,21 +1016,28 @@ func TestHintBarShowsRoutingState(t *testing.T) {
 	}
 
 	disabled := false
-	m.cfg.Typesafe.Enabled = &disabled
+	m.cfg.Router.Enabled = &disabled
 	hint = stripANSI(m.hintBar())
 	if !strings.Contains(hint, "jev off") {
-		t.Fatalf("hint bar must show jev off when disabled:\n%s", hint)
+		t.Fatalf("hint bar must show jev off when routing is disabled:\n%s", hint)
 	}
 	if !strings.Contains(hint, "⚑ glm-5.3") {
-		t.Fatalf("hint bar must keep the pinned model marker with jev off:\n%s", hint)
+		t.Fatalf("hint bar must keep the pinned model marker with routing off:\n%s", hint)
 	}
 
-	m.cfg.Typesafe.Enabled = nil
+	m.cfg.Router.Enabled = nil
 	m.cfg.Typesafe.APIKey = ""
 	hint = stripANSI(m.hintBar())
 	if !strings.Contains(hint, "jev off") {
 		t.Fatalf("hint bar must show jev off without an api key:\n%s", hint)
 	}
+
+	m.cfg.Router.Engine = router.EngineLaya
+	hint = stripANSI(m.hintBar())
+	if !strings.Contains(hint, "laya off") {
+		t.Fatalf("hint bar must show laya off without the engine installed:\n%s", hint)
+	}
+	m.cfg.Router.Engine = router.EngineJev
 }
 
 func TestHintBarSlimmedSegments(t *testing.T) {

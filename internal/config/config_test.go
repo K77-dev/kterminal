@@ -737,3 +737,84 @@ token_budget = 200000
 		t.Errorf("Typesafe.APIKey = %q, want \"ts-key\"", cfg.Typesafe.APIKey)
 	}
 }
+
+func TestLoadRouterDefaultsToJev(t *testing.T) {
+	writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Router.Engine != "jev" {
+		t.Fatalf("engine = %q, want jev default", cfg.Router.Engine)
+	}
+	if !cfg.Router.RoutingEnabled() {
+		t.Fatal("routing must default to enabled")
+	}
+	if cfg.Router.Shadow {
+		t.Fatal("shadow must default to false")
+	}
+}
+
+func TestLoadRouterExplicitEngine(t *testing.T) {
+	writeTestConfig(t, "[router]\nengine = \"laya\"\nshadow = true\n\n[typesafe]\nenabled = false\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Router.Engine != "laya" {
+		t.Fatalf("engine = %q, want laya", cfg.Router.Engine)
+	}
+	if !cfg.Router.Shadow {
+		t.Fatal("shadow = true must parse")
+	}
+	if !cfg.Router.RoutingEnabled() {
+		t.Fatal("routing enabled defaults to true with nil")
+	}
+	if cfg.Typesafe.JevEnabled() {
+		t.Fatal("typesafe.enabled stays an independent jev gate")
+	}
+}
+
+func TestLoadRouterInvalidEngine(t *testing.T) {
+	writeTestConfig(t, "[router]\nengine = \"grok\"\n")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "invalid router.engine") {
+		t.Fatalf("err = %v, want invalid router.engine", err)
+	}
+}
+
+func TestLoadRouterEnvOverride(t *testing.T) {
+	writeTestConfig(t, "[router]\nengine = \"jev\"\n")
+	t.Setenv("KTERMINAL_ROUTER", "laya")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Router.Engine != "laya" {
+		t.Fatalf("engine = %q, want laya from KTERMINAL_ROUTER", cfg.Router.Engine)
+	}
+}
+
+func TestSaveMaterializesRouterSection(t *testing.T) {
+	path := writeTestConfig(t, "[llm]\nbase_url = \"http://localhost:4000\"\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "[router]") || !strings.Contains(string(raw), "engine = \"jev\"") || !strings.Contains(string(raw), "enabled = true") {
+		t.Fatalf("saved config must materialize the router section:\n%s", string(raw))
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Router.Engine != "jev" || !reloaded.Router.RoutingEnabled() {
+		t.Fatalf("reloaded router = %+v, want jev enabled", reloaded.Router)
+	}
+}

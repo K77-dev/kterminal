@@ -16,6 +16,7 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/router"
 	"kterminal/internal/telemetry"
 )
 
@@ -364,14 +365,18 @@ func TestValidateModel(t *testing.T) {
 
 func TestDoctorRoutingLines(t *testing.T) {
 	disabled := false
-	cfg := &config.Config{Model: "glm-5.3", Typesafe: config.Typesafe{Enabled: &disabled}}
-	if out := doctorRoutingLines(cfg); out != "  jev enabled: no\n  model: glm-5.3\n" {
-		t.Fatalf("routing lines = %q, want jev disabled with fixed model", out)
+	cfg := &config.Config{Model: "glm-5.3", Router: config.Router{Enabled: &disabled}}
+	if out := doctorRoutingLines(cfg); out != "  router engine: jev\n  routing enabled: no\n  model: glm-5.3\n" {
+		t.Fatalf("routing lines = %q, want routing disabled with fixed model", out)
 	}
-	cfg.Typesafe.Enabled = nil
+	cfg.Router.Enabled = nil
 	cfg.Model = ""
-	if out := doctorRoutingLines(cfg); out != "  jev enabled: yes\n  model: auto\n" {
-		t.Fatalf("routing lines = %q, want jev enabled with auto model", out)
+	if out := doctorRoutingLines(cfg); out != "  router engine: jev\n  routing enabled: yes\n  model: auto\n" {
+		t.Fatalf("routing lines = %q, want routing enabled with auto model", out)
+	}
+	cfg.Router.Engine = router.EngineLaya
+	if out := doctorRoutingLines(cfg); out != "  router engine: laya\n  routing enabled: yes\n  model: auto\n" {
+		t.Fatalf("routing lines = %q, want the laya engine", out)
 	}
 }
 
@@ -422,19 +427,20 @@ func TestRunDoctorJevDisabledSkipsProbe(t *testing.T) {
 	disabled := false
 	cfg := &config.Config{
 		Model:    cat.DefaultModel,
+		Router:   config.Router{Enabled: &disabled},
 		Typesafe: config.Typesafe{APIKey: "witness-key", Enabled: &disabled},
 	}
 
 	out := captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
 
-	if !strings.Contains(out, "jev enabled: no") {
-		t.Fatalf("output missing 'jev enabled: no':\n%s", out)
+	if !strings.Contains(out, "routing enabled: no") {
+		t.Fatalf("output missing 'routing enabled: no':\n%s", out)
 	}
 	if !strings.Contains(out, "model: "+cat.DefaultModel) {
 		t.Fatalf("output missing 'model: %s':\n%s", cat.DefaultModel, out)
 	}
-	if !strings.Contains(out, "jev: disabled") {
-		t.Fatalf("output missing 'jev: disabled':\n%s", out)
+	if !strings.Contains(out, "router: disabled") {
+		t.Fatalf("output missing 'router: disabled':\n%s", out)
 	}
 	if n := requests.Load(); n != 0 {
 		t.Fatalf("typesafe endpoint received %d requests, want 0", n)
@@ -446,13 +452,14 @@ func TestRunDoctorJevEnabledProbesEndpoint(t *testing.T) {
 	cat, store, kspecStore := doctorFixture(t)
 	enabled := true
 	cfg := &config.Config{
+		Router:   config.Router{Enabled: &enabled},
 		Typesafe: config.Typesafe{APIKey: "witness-key", Enabled: &enabled},
 	}
 
 	out := captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
 
-	if !strings.Contains(out, "jev enabled: yes") {
-		t.Fatalf("output missing 'jev enabled: yes':\n%s", out)
+	if !strings.Contains(out, "routing enabled: yes") {
+		t.Fatalf("output missing 'routing enabled: yes':\n%s", out)
 	}
 	if !strings.Contains(out, "model: auto") {
 		t.Fatalf("output missing 'model: auto':\n%s", out)
@@ -471,5 +478,27 @@ func TestRunDoctorJevEnabledProbesEndpoint(t *testing.T) {
 	}
 	if n := requests.Load(); n != 2 {
 		t.Fatalf("typesafe endpoint received %d requests, want 2", n)
+	}
+}
+
+func TestRunDoctorLayaEngineSkipsJevProbe(t *testing.T) {
+	srv, requests := jevWitnessServer(t)
+	cat, store, kspecStore := doctorFixture(t)
+	enabled := true
+	cfg := &config.Config{
+		Router:   config.Router{Engine: router.EngineLaya, Enabled: &enabled},
+		Typesafe: config.Typesafe{APIKey: "witness-key", Enabled: &enabled},
+	}
+
+	out := captureStdout(t, func() { runDoctor(cfg, cat, store, kspecStore, srv.URL) })
+
+	if !strings.Contains(out, "router engine: laya") {
+		t.Fatalf("output missing 'router engine: laya':\n%s", out)
+	}
+	if !strings.Contains(out, "jev: skipped — active engine is laya") {
+		t.Fatalf("output missing the jev skip line:\n%s", out)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("typesafe endpoint received %d requests, want 0 with laya active", n)
 	}
 }

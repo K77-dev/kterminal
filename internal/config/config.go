@@ -41,6 +41,19 @@ func (t Typesafe) JevEnabled() bool {
 	return *t.Enabled
 }
 
+type Router struct {
+	Engine  string `toml:"engine"`
+	Enabled *bool  `toml:"enabled"`
+	Shadow  bool   `toml:"shadow"`
+}
+
+func (r Router) RoutingEnabled() bool {
+	if r.Enabled == nil {
+		return true
+	}
+	return *r.Enabled
+}
+
 type Squad struct {
 	DefaultMode     string            `toml:"default_mode"`
 	MaxConvocations int               `toml:"max_convocations"`
@@ -52,6 +65,7 @@ type Config struct {
 	Model    string   `toml:"model"`
 	LLM      LLM      `toml:"llm"`
 	Typesafe Typesafe `toml:"typesafe"`
+	Router   Router   `toml:"router"`
 	Squad    Squad    `toml:"squad"`
 	Agent    Agent    `toml:"agent"`
 }
@@ -70,6 +84,10 @@ const (
 
 func validMode(mode string) bool {
 	return mode == "sdd" || mode == "squad"
+}
+
+func validRouterEngine(engine string) bool {
+	return engine == "" || engine == "jev" || engine == "laya"
 }
 
 func parseDurationField(key, value string) (time.Duration, error) {
@@ -142,6 +160,9 @@ func Load() (*Config, error) {
 		}
 		cfg.Typesafe.Enabled = &enabled
 	}
+	if v := os.Getenv("KTERMINAL_ROUTER"); v != "" {
+		cfg.Router.Engine = v
+	}
 	if v := os.Getenv("KTERMINAL_MODEL"); v != "" {
 		cfg.Model = v
 	}
@@ -188,6 +209,12 @@ func Load() (*Config, error) {
 	if !validMode(cfg.Squad.DefaultMode) {
 		return nil, fmt.Errorf("invalid squad.default_mode %q: must be \"sdd\" or \"squad\"", cfg.Squad.DefaultMode)
 	}
+	if !validRouterEngine(cfg.Router.Engine) {
+		return nil, fmt.Errorf("invalid router.engine %q: must be \"jev\" or \"laya\"", cfg.Router.Engine)
+	}
+	if cfg.Router.Engine == "" {
+		cfg.Router.Engine = "jev"
+	}
 	return cfg, nil
 }
 
@@ -195,6 +222,13 @@ func (c *Config) Save() error {
 	if c.Typesafe.Enabled == nil {
 		enabled := true
 		c.Typesafe.Enabled = &enabled
+	}
+	if c.Router.Enabled == nil {
+		enabled := true
+		c.Router.Enabled = &enabled
+	}
+	if c.Router.Engine == "" {
+		c.Router.Engine = "jev"
 	}
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err

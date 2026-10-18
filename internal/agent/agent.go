@@ -1114,7 +1114,7 @@ func (a *Agent) decide(ctx context.Context, userMessage llm.Message, step int) (
 		if fbErr != nil {
 			return router.Decision{}, fmt.Errorf("jev router: %v; heuristic router: %v", err, fbErr)
 		}
-		decision.Reason = "fallback after jev error: " + err.Error()
+		decision.Reason = "fallback after router error: " + err.Error()
 		return decision, nil
 	}
 	if decision.Confidence > 0 && decision.Confidence < router.MinConfidence(len(candidates)) {
