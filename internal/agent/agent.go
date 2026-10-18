@@ -36,6 +36,14 @@ const toolOutputThrottle = 50 * time.Millisecond
 
 var errMaxSteps = errors.New("reached max tool steps")
 
+var personaContract = fmt.Sprintf(`
+
+Contribution contract:
+- Facts provided in the guidance were already gathered by the maestro; treat them as verified and do not re-read files to confirm them.
+- Read only what the guidance does not already cover, and only when needed for your contribution.
+- You have a hard limit of %d tool steps. As you approach that limit, stop exploring and write your contribution.
+- End with a complete, self-contained contribution.`, subagentMaxSteps)
+
 var errTurnActive = errors.New("agent is running a turn")
 
 type EventKind string
@@ -236,6 +244,7 @@ func (a *Agent) RegisterKickoff(k squad.Kickoff) {
 	for i := 0; i < convocations; i++ {
 		m.AddConvocation()
 	}
+	a.rebuildSystemPrompt()
 }
 
 func (a *Agent) kickoffDisciplines(k squad.Kickoff) map[string]string {
@@ -317,7 +326,7 @@ func (a *Agent) stepLimit() int {
 	if a.depth > 0 {
 		return subagentMaxSteps
 	}
-	if a.activeSkill != "" || a.mode == "squad" {
+	if a.activeSkill != "" || a.maestroActive() {
 		return skillMaxSteps
 	}
 	return maxSteps
@@ -416,6 +425,7 @@ func (a *Agent) buildPersonaPrompt(persona squad.Persona) string {
 	if rules := a.personaRules(persona); len(rules) > 0 {
 		sections = append(sections, rulesSection(rules))
 	}
+	sections = append(sections, personaContract)
 	return strings.Join(sections, "\n\n")
 }
 
@@ -489,7 +499,7 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 	watchdog.stop()
 	if err != nil {
 		if errors.Is(err, errMaxSteps) {
-			return fmt.Sprintf("error: subtask exceeded max steps (%d)", subagentMaxSteps), nil
+			return maxStepsResult(sub.messages), nil
 		}
 		if stalled.Load() {
 			return fmt.Sprintf("error: subtask stalled for %s without progress", timeout), nil
@@ -497,6 +507,38 @@ func (a *Agent) runSubagent(ctx context.Context, sub *Agent) (string, error) {
 		return "", err
 	}
 	return text, nil
+}
+
+const partialContributionCap = 2000
+
+func capRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
+func lastAssistantText(messages []llm.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		return m.Content
+	}
+	return ""
+}
+
+func maxStepsResult(messages []llm.Message) string {
+	excerpt := capRunes(strings.TrimSpace(lastAssistantText(messages)), partialContributionCap)
+	if excerpt == "" {
+		return fmt.Sprintf("error: subtask exceeded max steps (%d)", subagentMaxSteps)
+	}
+	return fmt.Sprintf("error: subtask exceeded max steps (%d); partial contribution: %s", subagentMaxSteps, excerpt)
 }
 
 type stallWatchdog struct {
@@ -638,6 +680,7 @@ func (a *Agent) convokePersona(ctx context.Context, name, description, guidance 
 		m.AddConvocation()
 		m.StartDeliberation(name)
 	}
+	guidance = squad.Digest(guidance)
 	reg := a.personaRegistry()
 	pin := a.personaPin(name)
 	text, err := a.RunSyncPersona(ctx, persona, description, guidance, pin, reg)
@@ -690,8 +733,8 @@ func (a *Agent) AttachSquadKickoffTool() {
 }
 
 func formatKickoffText(k squad.Kickoff) string {
-	return fmt.Sprintf("mesa: roles=%v max_convocations=%d token_budget=%d exit_criterion=%q",
-		k.Roles, k.MaxConvocations, k.TokenBudget, k.ExitCriterion)
+	return fmt.Sprintf("mesa registered: roles=%v max_convocations=%d token_budget=%d exit_criterion=%q — maestro restrictions and %d-step limit now apply",
+		k.Roles, k.MaxConvocations, k.TokenBudget, k.ExitCriterion, skillMaxSteps)
 }
 
 func (a *Agent) AttachAskUserTool() {
@@ -988,8 +1031,15 @@ func (a *Agent) executeTool(ctx context.Context, name, argsJSON string) (tools.R
 	return res, err
 }
 
+func (a *Agent) maestroActive() bool {
+	a.mu.Lock()
+	active := a.kickoff != nil
+	a.mu.Unlock()
+	return active || a.mode == "squad"
+}
+
 func (a *Agent) maestroRestricted() bool {
-	return a.depth == 0 && a.mode == "squad"
+	return a.depth == 0 && a.maestroActive()
 }
 
 func (a *Agent) squadBlocksTool(name string) bool {

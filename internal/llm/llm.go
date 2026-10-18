@@ -166,7 +166,7 @@ type Limits struct {
 var defaultLimits = Limits{
 	RequestTimeout:   10 * time.Minute,
 	IdleTimeout:      5 * time.Minute,
-	FirstByteTimeout: 60 * time.Second,
+	FirstByteTimeout: 120 * time.Second,
 	MaxRetries:       2,
 }
 

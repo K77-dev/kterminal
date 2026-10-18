@@ -175,3 +175,46 @@ func (m *Mesa) entryIndexLocked(name string) int {
 	}
 	return -1
 }
+
+const (
+	digestHeadCap  = 600
+	digestTailCap  = 4000
+	digestTotalCap = 6000
+)
+
+const guidanceTruncated = "[guidance truncated]"
+
+func Digest(s string) string {
+	r := []rune(s)
+	if len(r) <= digestTotalCap {
+		return s
+	}
+	tailStart := len(r) - digestTailCap
+	if i := indexRuneFrom(r, tailStart, '\n'); i >= 0 {
+		tailStart = i + 1
+	}
+	tail := r[tailStart:]
+	head := r[:tailStart]
+	if len(head) > digestHeadCap {
+		head = head[:digestHeadCap]
+	}
+	var b strings.Builder
+	b.WriteString(string(head))
+	b.WriteString("\n")
+	b.WriteString(guidanceTruncated)
+	b.WriteString("\n")
+	b.WriteString(string(tail))
+	return b.String()
+}
+
+func indexRuneFrom(r []rune, from int, target rune) int {
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i < len(r); i++ {
+		if r[i] == target {
+			return i
+		}
+	}
+	return -1
+}

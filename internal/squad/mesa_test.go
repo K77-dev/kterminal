@@ -3,8 +3,10 @@ package squad
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 func mesaTestKickoff() Kickoff {
@@ -440,4 +442,93 @@ func TestMesaConcurrentAccess(t *testing.T) {
 	if m.Convocations != goroutines*iterations {
 		t.Errorf("Convocations = %d, want %d", m.Convocations, goroutines*iterations)
 	}
+}
+
+func TestDigest(t *testing.T) {
+	t.Run("empty string identity", func(t *testing.T) {
+		if got := Digest(""); got != "" {
+			t.Errorf("Digest(\"\") = %q, want %q", got, "")
+		}
+	})
+
+	t.Run("short ascii identity", func(t *testing.T) {
+		in := strings.Repeat("a", 100)
+		if got := Digest(in); got != in {
+			t.Errorf("Digest(short) changed the input")
+		}
+	})
+
+	t.Run("at cap identity", func(t *testing.T) {
+		in := strings.Repeat("a", digestTotalCap)
+		if got := Digest(in); got != in {
+			t.Errorf("Digest(at cap) must be byte-for-byte identity")
+		}
+	})
+
+	t.Run("over cap no newlines", func(t *testing.T) {
+		in := strings.Repeat("A", digestTotalCap+501)
+		got := Digest(in)
+		if !strings.Contains(got, guidanceTruncated) {
+			t.Fatalf("result missing %q", guidanceTruncated)
+		}
+		parts := strings.Split(got, "\n")
+		if len(parts) != 3 {
+			t.Fatalf("result has %d lines, want 3", len(parts))
+		}
+		if parts[0] != strings.Repeat("A", digestHeadCap) {
+			t.Errorf("head segment = %d 'A's, want %d", len(parts[0]), digestHeadCap)
+		}
+		if parts[2] != strings.Repeat("A", digestTailCap) {
+			t.Errorf("tail segment = %d 'A's, want %d", len(parts[2]), digestTailCap)
+		}
+		wantRunes := digestHeadCap + 1 + len([]rune(guidanceTruncated)) + 1 + digestTailCap
+		if gotRunes := len([]rune(got)); gotRunes != wantRunes {
+			t.Errorf("total rune count = %d, want %d", gotRunes, wantRunes)
+		}
+	})
+
+	t.Run("over cap tail snapped to line boundary", func(t *testing.T) {
+		in := strings.Repeat("A", 5500) + "\n" + strings.Repeat("B", 1000)
+		want := strings.Repeat("A", digestHeadCap) + "\n" + guidanceTruncated + "\n" + strings.Repeat("B", 1000)
+		got := Digest(in)
+		if got != want {
+			t.Errorf("Digest(tail snap) mismatch: got %d bytes, want %d bytes", len(got), len(want))
+		}
+		if strings.Contains(strings.Split(got, "\n")[2], "A") {
+			t.Errorf("tail contains 'A', want only B's")
+		}
+	})
+
+	t.Run("multibyte under rune cap identity", func(t *testing.T) {
+		in := strings.Repeat("é", 4000)
+		if got := Digest(in); got != in {
+			t.Errorf("Digest(4000 runes / 8000 bytes) must stay identity")
+		}
+	})
+
+	t.Run("multibyte over rune cap", func(t *testing.T) {
+		in := strings.Repeat("é", digestTotalCap+501)
+		got := Digest(in)
+		if !utf8.ValidString(got) {
+			t.Fatalf("result is not valid UTF-8")
+		}
+		if strings.ContainsRune(got, '\uFFFD') {
+			t.Errorf("result contains U+FFFD")
+		}
+		maxRunes := digestHeadCap + digestTailCap + len([]rune(guidanceTruncated)) + 2
+		if gotRunes := len([]rune(got)); gotRunes > maxRunes {
+			t.Errorf("rune count = %d, want <= %d", gotRunes, maxRunes)
+		}
+	})
+
+	t.Run("newline at tail start index", func(t *testing.T) {
+		in := strings.Repeat("A", digestTotalCap-digestTailCap) + "\n" + strings.Repeat("B", digestTailCap+1)
+		got := Digest(in)
+		if !utf8.ValidString(got) {
+			t.Fatalf("result is not valid UTF-8")
+		}
+		if !strings.Contains(got, guidanceTruncated) {
+			t.Errorf("result missing %q", guidanceTruncated)
+		}
+	})
 }

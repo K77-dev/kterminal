@@ -289,8 +289,8 @@ func TestLoadResilienceDefaults(t *testing.T) {
 	if cfg.LLM.IdleTimeoutDuration != 5*time.Minute {
 		t.Errorf("IdleTimeoutDuration = %v, want 5m", cfg.LLM.IdleTimeoutDuration)
 	}
-	if cfg.LLM.FirstByteTimeoutDuration != 60*time.Second {
-		t.Errorf("FirstByteTimeoutDuration = %v, want 60s", cfg.LLM.FirstByteTimeoutDuration)
+	if cfg.LLM.FirstByteTimeoutDuration != 120*time.Second {
+		t.Errorf("FirstByteTimeoutDuration = %v, want 120s", cfg.LLM.FirstByteTimeoutDuration)
 	}
 	if cfg.LLM.MaxRetries != 2 {
 		t.Errorf("MaxRetries = %d, want 2", cfg.LLM.MaxRetries)

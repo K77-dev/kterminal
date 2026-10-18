@@ -104,12 +104,19 @@ func (a *Agent) applySkill(name, eventType string) {
 	a.Session.Write(session.Event{Type: eventType, Skill: name, Source: source, Depth: a.depth})
 }
 
+func maestroAddendum() string {
+	return fmt.Sprintf("\n\nMesa active: you are the maestro. Delegate work through convocations instead of implementing directly. Mutating tools other than the task tool are restricted, and your step limit is now %d steps.", skillMaxSteps)
+}
+
 func (a *Agent) rebuildSystemPrompt() {
 	if a.mode == "squad" && a.squadStore != nil {
 		a.systemPrompt = a.squadStore.MaestroPrompt()
 		return
 	}
 	a.systemPrompt = a.buildSystemPrompt()
+	if a.maestroActive() {
+		a.systemPrompt += maestroAddendum()
+	}
 }
 
 func (a *Agent) buildSystemPrompt() string {

@@ -27,6 +27,7 @@ $ go run .
 - [Processos em background](#processos-em-background)
 - [Sob o capô](#sob-o-capô)
 - [Comandos](#comandos)
+- [Solução de problemas](#solução-de-problemas)
 - [Desenvolvimento](#desenvolvimento)
 
 ---
@@ -407,6 +408,14 @@ A mesa não vive fora do processo do repo: personas leem artefatos de `spec/` co
 | `/config` | Abre a configuração (gateway, keys, engine, modelo) |
 | `/help` | Lista de comandos |
 | `/clear`, `/image`, `/unimage`, `/exit` | Sessão e anexos |
+
+## Solução de problemas
+
+- **`reached max tool steps (50) without a final answer`** — o maestro rodou sem a disciplina da mesa: ou a sessão estava em `/mode sdd` (o padrão) quando a mesa foi aberta, ou o binário é anterior aos limites atuais. Confira com `/mode`; se mostrar `squad`, reconstrua o binário (`go build`). O modo não troca no meio do turno — defina-o **antes** do kickoff. Digitar `continue` retoma do snapshot com um novo orçamento de steps.
+- Desde o fix, registrar a mesa com `squad_kickoff` ativa as restrições de maestro e o limite de 100 steps **em qualquer modo** — a linha de kickoff confirma com `maestro restrictions and 100-step limit now apply`.
+- Personas têm teto **duro** de 20 steps e são instruídas a confiar nos fatos repassados pelo maestro em vez de reler arquivos. Se ainda assim uma persona bater no teto, o último texto escrito é resgatado: a contribuição chega com `partial contribution:`.
+- O `guidance` repassado às personas é limitado: acima de ~6000 caracteres é truncado com o marcador `[guidance truncated]` (trecho inicial + conteúdo mais recente preservados).
+- Timeout de stream: o first-byte timeout padrão agora é 120s (`llm.first_byte_timeout` no `config.toml`) — prompts muito grandes legitimamente demoram mais para produzir o primeiro token.
 
 ## Desenvolvimento
 

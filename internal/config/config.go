@@ -77,7 +77,7 @@ const (
 
 	defaultRequestTimeout   = "10m"
 	defaultIdleTimeout      = "5m"
-	defaultFirstByteTimeout = "60s"
+	defaultFirstByteTimeout = "120s"
 	defaultMaxRetries       = 2
 	defaultSubagentTimeout  = "10m"
 )

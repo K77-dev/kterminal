@@ -13,11 +13,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"kterminal/internal/catalog"
 	"kterminal/internal/jev"
@@ -576,6 +578,161 @@ func TestStepLimitByContext(t *testing.T) {
 	ag.depth = 1
 	if got := ag.stepLimit(); got != subagentMaxSteps {
 		t.Fatalf("stepLimit = %d, want %d for a subagent", got, subagentMaxSteps)
+	}
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+	ag.depth = 0
+	ag.activeSkill = ""
+	if got := ag.stepLimit(); got != skillMaxSteps {
+		t.Fatalf("stepLimit = %d, want %d with a registered kickoff", got, skillMaxSteps)
+	}
+	ag.mode = "squad"
+	ag.depth = 1
+	if got := ag.stepLimit(); got != subagentMaxSteps {
+		t.Fatalf("stepLimit = %d, want %d for a subagent even with a kickoff and squad mode", got, subagentMaxSteps)
+	}
+}
+
+func TestMaestroActive(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	if ag.maestroActive() {
+		t.Fatal("maestroActive = true, want false on a zero-value agent")
+	}
+	ag.mode = "squad"
+	if !ag.maestroActive() {
+		t.Fatal("maestroActive = false, want true in squad mode")
+	}
+	ag.mode = "sdd"
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+	if !ag.maestroActive() {
+		t.Fatal("maestroActive = false, want true with a registered kickoff in sdd mode")
+	}
+	ag.mode = "squad"
+	if !ag.maestroActive() {
+		t.Fatal("maestroActive = false, want true with kickoff and squad mode")
+	}
+	ag.depth = 1
+	if !ag.maestroActive() {
+		t.Fatal("maestroActive = false, want true regardless of depth")
+	}
+}
+
+func TestSquadBlocksToolGating(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(*Agent)
+		tool    string
+		blocked bool
+	}{
+		{
+			name:    "squad mode blocks mutating tools",
+			setup:   func(ag *Agent) { ag.mode = "squad" },
+			tool:    "bash",
+			blocked: true,
+		},
+		{
+			name: "kickoff in sdd mode blocks mutating tools",
+			setup: func(ag *Agent) {
+				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+			},
+			tool:    "bash",
+			blocked: true,
+		},
+		{
+			name: "kickoff in sdd mode does not block subagents",
+			setup: func(ag *Agent) {
+				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+				ag.depth = 1
+			},
+			tool:    "bash",
+			blocked: false,
+		},
+		{
+			name: "kickoff in sdd mode keeps the task tool",
+			setup: func(ag *Agent) {
+				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+			},
+			tool:    "task",
+			blocked: false,
+		},
+		{
+			name: "kickoff in sdd mode keeps read tools",
+			setup: func(ag *Agent) {
+				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+			},
+			tool:    "read",
+			blocked: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+			tc.setup(ag)
+			if got := ag.squadBlocksTool(tc.tool); got != tc.blocked {
+				t.Fatalf("squadBlocksTool(%q) = %v, want %v", tc.tool, got, tc.blocked)
+			}
+		})
+	}
+}
+
+func TestRegisterKickoffAddendum(t *testing.T) {
+	store := squad.Load()
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachKspec(kspec.Load())
+	ag.AttachSquad(store)
+
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+	if !strings.Contains(ag.systemPrompt, "You are kterminal") {
+		t.Fatalf("system prompt = %q, want the base prompt preserved", ag.systemPrompt)
+	}
+	if !strings.Contains(ag.systemPrompt, "Mesa active: you are the maestro.") {
+		t.Fatalf("system prompt missing the maestro addendum: %q", ag.systemPrompt)
+	}
+
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+	if got := strings.Count(ag.systemPrompt, "Mesa active"); got != 1 {
+		t.Fatalf("addendum count after double registration = %d, want 1 (rebuild is idempotent)", got)
+	}
+
+	if err := ag.ActivateSkill("kspec-version"); err != nil {
+		t.Fatalf("ActivateSkill: %v", err)
+	}
+	if !strings.Contains(ag.systemPrompt, "Mesa active: you are the maestro.") {
+		t.Fatalf("system prompt lost the addendum after ActivateSkill: %q", ag.systemPrompt)
+	}
+	ag.ClearSkill()
+
+	ag.mode = "squad"
+	ag.rebuildSystemPrompt()
+	if ag.systemPrompt != store.MaestroPrompt() {
+		t.Fatalf("system prompt in squad mode = %q, want the maestro prompt", ag.systemPrompt)
+	}
+	if strings.Contains(ag.systemPrompt, "Mesa active") {
+		t.Fatalf("squad mode must not append the addendum on top of the maestro prompt: %q", ag.systemPrompt)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ag.ActivateMode("sdd")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ActivateMode deadlocked after RegisterKickoff")
+	}
+	if !strings.Contains(ag.systemPrompt, "Mesa active: you are the maestro.") {
+		t.Fatalf("system prompt lost the addendum after returning to sdd mode: %q", ag.systemPrompt)
+	}
+}
+
+func TestFormatKickoffTextAdvisory(t *testing.T) {
+	text := formatKickoffText(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 4, TokenBudget: 60000, ExitCriterion: "plan converged"})
+	if !strings.HasPrefix(text, "mesa registered: roles=") {
+		t.Fatalf("kickoff text = %q, want the mesa registered prefix", text)
+	}
+	want := "maestro restrictions and " + strconv.Itoa(skillMaxSteps) + "-step limit now apply"
+	if !strings.Contains(text, want) {
+		t.Fatalf("kickoff text = %q, want the advisory suffix %q", text, want)
 	}
 }
 
@@ -6192,5 +6349,380 @@ func TestBackgroundSurvivesEsc(t *testing.T) {
 	}
 	if pm.Count() != 1 {
 		t.Fatalf("Count() = %d, want 1 (background survives esc)", pm.Count())
+	}
+}
+
+func TestBuildPersonaPromptContract(t *testing.T) {
+	ag := newTestAgent(t, "http://gw.example", "http://jev.example", nil, false)
+	contractTail := "End with a complete, self-contained contribution."
+	var suffixes []string
+	for _, name := range []string{"architect", "qa"} {
+		persona, err := squad.Load().Resolve(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		prompt := ag.buildPersonaPrompt(persona)
+		if !strings.Contains(prompt, persona.Prompt) {
+			t.Fatalf("%s prompt missing persona body", name)
+		}
+		if want := "hard limit of " + strconv.Itoa(subagentMaxSteps) + " tool steps"; !strings.Contains(prompt, want) {
+			t.Fatalf("%s prompt missing %q", name, want)
+		}
+		if !strings.Contains(prompt, "do not re-read files") {
+			t.Fatalf("%s prompt missing re-read prohibition", name)
+		}
+		if !strings.Contains(prompt, "stop exploring") {
+			t.Fatalf("%s prompt missing stop exploring clause", name)
+		}
+		if !(strings.Index(prompt, persona.Prompt) < strings.Index(prompt, "Contribution contract:")) {
+			t.Fatalf("%s contract appears before persona body", name)
+		}
+		if !strings.HasSuffix(prompt, contractTail) {
+			t.Fatalf("%s prompt does not end with contract tail", name)
+		}
+		suffixes = append(suffixes, prompt[len(prompt)-len(contractTail):])
+	}
+	if len(suffixes) != 2 {
+		t.Fatalf("expected 2 personas, got %d", len(suffixes))
+	}
+	if suffixes[0] != suffixes[1] {
+		t.Fatalf("personas end with different contract tails: %q vs %q", suffixes[0], suffixes[1])
+	}
+}
+
+func TestConvokePersonaDigestsGuidance(t *testing.T) {
+	cat := testCatalog(t)
+	var calls []chatCall
+	gw := taskFlowGateway(t, [][]string{contentChunks("architect contribution", 10, 2)}, &calls)
+	ag := New(
+		llm.New(gw.URL, "gw-key", false),
+		nil,
+		nil,
+		cat,
+		tools.NewRegistry(),
+		nil,
+		false,
+	)
+	ag.SetSquadPins(map[string]string{"architect": "glm-5.3"})
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 4})
+
+	description := "review the design"
+	guidance := strings.Repeat("prior context ", 1000)
+	if _, err := ag.convokePersona(context.Background(), "architect", description, guidance); err != nil {
+		t.Fatalf("convokePersona: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("gateway calls = %d, want 1", len(calls))
+	}
+	var userMsg string
+	for _, m := range calls[0].Messages {
+		if m.Role == "user" {
+			userMsg = m.Content
+		}
+	}
+	if !strings.HasPrefix(userMsg, description) {
+		t.Fatalf("user message = %q, want it to start with the description verbatim", userMsg)
+	}
+	if !strings.Contains(userMsg, squad.Digest(guidance)) {
+		t.Fatal("user message must contain the digested guidance")
+	}
+	if strings.Contains(userMsg, guidance) {
+		t.Fatal("user message leaked the full undigested guidance")
+	}
+}
+
+func TestLastAssistantText(t *testing.T) {
+	toolFrame := llm.Message{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: llm.FuncCall{Name: "bash", Arguments: "{}"},
+		}},
+	}
+	cases := []struct {
+		name     string
+		messages []llm.Message
+		want     string
+	}{
+		{
+			name:     "single text frame",
+			messages: []llm.Message{{Role: "assistant", Content: "the answer"}},
+			want:     "the answer",
+		},
+		{
+			name:     "tool calls only",
+			messages: []llm.Message{toolFrame},
+			want:     "",
+		},
+		{
+			name: "interleaved frames",
+			messages: []llm.Message{
+				{Role: "assistant", Content: "first"},
+				toolFrame,
+				{Role: "assistant", Content: "second"},
+			},
+			want: "second",
+		},
+		{
+			name: "text alongside tool calls",
+			messages: []llm.Message{{
+				Role:    "assistant",
+				Content: "analysis before the tool call",
+				ToolCalls: []llm.ToolCall{{
+					ID:       "c2",
+					Type:     "function",
+					Function: llm.FuncCall{Name: "bash", Arguments: "{}"},
+				}},
+			}},
+			want: "analysis before the tool call",
+		},
+		{
+			name:     "whitespace only text",
+			messages: []llm.Message{{Role: "assistant", Content: "  \n\t "}},
+			want:     "",
+		},
+		{
+			name:     "empty slice",
+			messages: nil,
+			want:     "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lastAssistantText(tc.messages); got != tc.want {
+				t.Fatalf("lastAssistantText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCapRunes(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		n     int
+		check func(t *testing.T, got string)
+	}{
+		{
+			name:  "under cap",
+			input: "short",
+			n:     10,
+			check: func(t *testing.T, got string) {
+				if got != "short" {
+					t.Fatalf("capRunes() = %q, want identity", got)
+				}
+			},
+		},
+		{
+			name:  "exactly n runes",
+			input: strings.Repeat("a", 10),
+			n:     10,
+			check: func(t *testing.T, got string) {
+				if got != strings.Repeat("a", 10) {
+					t.Fatalf("capRunes() = %q, want identity", got)
+				}
+			},
+		},
+		{
+			name:  "n plus ten runes",
+			input: strings.Repeat("b", 20),
+			n:     10,
+			check: func(t *testing.T, got string) {
+				if got != strings.Repeat("b", 10)+"..." {
+					t.Fatalf("capRunes() = %q, want %q", got, strings.Repeat("b", 10)+"...")
+				}
+				if rc := len([]rune(got)); rc != 13 {
+					t.Fatalf("rune count = %d, want 13", rc)
+				}
+			},
+		},
+		{
+			name:  "multibyte over cap",
+			input: strings.Repeat("é", 15),
+			n:     10,
+			check: func(t *testing.T, got string) {
+				if !utf8.ValidString(got) {
+					t.Fatalf("capRunes() produced invalid utf8: %q", got)
+				}
+				if rc := len([]rune(got)); rc != 13 {
+					t.Fatalf("rune count = %d, want 13", rc)
+				}
+				if strings.ContainsRune(got, '�') {
+					t.Fatalf("capRunes() contains U+FFFD: %q", got)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, capRunes(tc.input, tc.n))
+		})
+	}
+}
+
+func TestMaxStepsResult(t *testing.T) {
+	toolFrame := llm.Message{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: llm.FuncCall{Name: "bash", Arguments: "{}"},
+		}},
+	}
+	longText := strings.Repeat("x", partialContributionCap+50)
+	cases := []struct {
+		name     string
+		messages []llm.Message
+		check    func(t *testing.T, got string)
+	}{
+		{
+			name:     "salvageable text",
+			messages: []llm.Message{{Role: "assistant", Content: "the analysis so far"}},
+			check: func(t *testing.T, got string) {
+				want := "error: subtask exceeded max steps (" + strconv.Itoa(subagentMaxSteps) + "); partial contribution: the analysis so far"
+				if got != want {
+					t.Fatalf("maxStepsResult() = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			name:     "tool calls only",
+			messages: []llm.Message{toolFrame},
+			check: func(t *testing.T, got string) {
+				want := "error: subtask exceeded max steps (" + strconv.Itoa(subagentMaxSteps) + ")"
+				if got != want {
+					t.Fatalf("maxStepsResult() = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			name:     "text over cap",
+			messages: []llm.Message{{Role: "assistant", Content: longText}},
+			check: func(t *testing.T, got string) {
+				prefix := "error: subtask exceeded max steps (" + strconv.Itoa(subagentMaxSteps) + "); partial contribution: "
+				if rc := len([]rune(got)); rc != len([]rune(prefix))+partialContributionCap+3 {
+					t.Fatalf("rune count = %d, want %d", rc, len([]rune(prefix))+partialContributionCap+3)
+				}
+				if !strings.HasSuffix(got, "...") {
+					t.Fatalf("maxStepsResult() does not end with ellipsis: %q", got[len(got)-10:])
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, maxStepsResult(tc.messages))
+		})
+	}
+}
+
+func TestConvokePersonaAppliesDigest(t *testing.T) {
+	responses := [][]string{contentChunks("architect contribution", 10, 2)}
+	var calls []chatCall
+	gw := taskFlowGateway(t, responses, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 4})
+
+	text, err := ag.convokePersona(context.Background(), "architect", "review the design", strings.Repeat("g", 8000))
+	if err != nil {
+		t.Fatalf("convokePersona: %v", err)
+	}
+	if !strings.Contains(text, "architect contribution") {
+		t.Fatalf("convocation text = %q, want the persona contribution", text)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("gateway calls = %d, want 1 (the convocation)", len(calls))
+	}
+	var userMsg string
+	for _, m := range calls[0].Messages {
+		if m.Role == "user" {
+			userMsg = m.Content
+		}
+	}
+	if !strings.Contains(userMsg, "review the design") {
+		t.Fatalf("user message lost the description: %q", userMsg)
+	}
+	if !strings.Contains(userMsg, "[guidance truncated]") {
+		t.Fatalf("user message missing the truncation marker: %q", userMsg)
+	}
+	if got := len([]rune(userMsg)); got > 7000 {
+		t.Fatalf("user message rune count = %d, want the digested guidance well under the 8000-rune input", got)
+	}
+}
+
+func TestConvokePersonaKeepsShortGuidance(t *testing.T) {
+	responses := [][]string{contentChunks("architect contribution", 10, 2)}
+	var calls []chatCall
+	gw := taskFlowGateway(t, responses, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}, MaxConvocations: 4})
+
+	if _, err := ag.convokePersona(context.Background(), "architect", "review the design", "short guidance"); err != nil {
+		t.Fatalf("convokePersona: %v", err)
+	}
+	var userMsg string
+	for _, m := range calls[0].Messages {
+		if m.Role == "user" {
+			userMsg = m.Content
+		}
+	}
+	if !strings.Contains(userMsg, "short guidance") {
+		t.Fatalf("user message lost the guidance: %q", userMsg)
+	}
+	if strings.Contains(userMsg, "[guidance truncated]") {
+		t.Fatalf("short guidance must pass through undigested: %q", userMsg)
+	}
+}
+
+func TestSalvagePreservesCallCount(t *testing.T) {
+	responses := [][]string{
+		toolCallChunks("call_1", "task", `{"description":"keep running commands forever"}`),
+	}
+	for i := 0; i < subagentMaxSteps; i++ {
+		step := append(contentChunks(fmt.Sprintf("partial analysis %d", i), 10, 2),
+			toolCallChunks(fmt.Sprintf("sub_%d", i), "bash", `{"command":"echo step"}`)...)
+		responses = append(responses, step)
+	}
+	responses = append(responses, contentChunks("parent recovered from the runaway subtask", 20, 1))
+	var calls []chatCall
+	gw := taskFlowGateway(t, responses, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.AttachTaskTool()
+
+	ag.Run("delegate something endless")
+	events := collectParentTurnEvents(t, ag)
+
+	if len(calls) != 2+subagentMaxSteps {
+		t.Fatalf("gateway calls = %d, want %d (parent x2 + subagent limited to %d)", len(calls), 2+subagentMaxSteps, subagentMaxSteps)
+	}
+	subToolStarts := 0
+	var taskResult *Event
+	for i, e := range events {
+		if e.Kind == EventToolStart && e.Depth == 1 {
+			subToolStarts++
+		}
+		if e.Kind == EventToolResult && e.Tool == taskToolName {
+			taskResult = &events[i]
+		}
+	}
+	if subToolStarts != subagentMaxSteps {
+		t.Fatalf("subagent tool starts = %d, want exactly %d before the limit", subToolStarts, subagentMaxSteps)
+	}
+	if taskResult == nil {
+		t.Fatal("no tool_result for task")
+	}
+	if !strings.Contains(taskResult.Result, "partial contribution:") {
+		t.Fatalf("task result = %q, want the salvaged partial contribution", taskResult.Result)
+	}
+	wantExcerpt := fmt.Sprintf("partial analysis %d", subagentMaxSteps-1)
+	if !strings.Contains(taskResult.Result, wantExcerpt) {
+		t.Fatalf("task result = %q, want the last text frame %q", taskResult.Result, wantExcerpt)
 	}
 }

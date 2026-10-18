@@ -259,7 +259,7 @@ subagent_timeout = "2m"
 
 	out := doctorLimitsLines(cfg)
 
-	want := "  llm timeouts: first byte 1m0s, idle 1m30s, total 10m0s, retries 2\n" +
+	want := "  llm timeouts: first byte 2m0s, idle 1m30s, total 10m0s, retries 2\n" +
 		"  agent: subagent stall 2m0s\n"
 	if out != want {
 		t.Fatalf("limits lines = %q, want %q", out, want)
