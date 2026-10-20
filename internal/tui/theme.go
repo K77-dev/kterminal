@@ -60,6 +60,12 @@ var (
 	promptChevronStyle = lipgloss.NewStyle().
 				Foreground(colAmber)
 
+	planModeStyle = lipgloss.NewStyle().
+			Foreground(colAmber)
+
+	buildModeStyle = lipgloss.NewStyle().
+			Foreground(colJade)
+
 	routeStyle = lipgloss.NewStyle().
 			Foreground(colJade)
 

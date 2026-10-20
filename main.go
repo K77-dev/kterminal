@@ -23,6 +23,7 @@ import (
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
 	"kterminal/internal/router"
+	"kterminal/internal/rtk"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
 	"kterminal/internal/telemetry"
@@ -108,6 +109,14 @@ func main() {
 	reg.SetOnGoEdit(tools.GoVetHook)
 	reg.SetProcMon(pm)
 
+	var rtkDet *rtk.Detector
+	if cfg.RTK.EnabledVal() {
+		rtkDet = &rtk.Detector{}
+		if rtkDet.Available() {
+			reg.SetRtkDetector(rtkDet)
+		}
+	}
+
 	ag := agent.New(llmClient, primary, fallback, cat, reg, sess, *confirm)
 	ag.SetPinned(cfg.Model)
 	ag.Telemetry = store
@@ -116,6 +125,9 @@ func main() {
 	ag.SetSquadPins(cfg.Squad.Pins)
 	ag.SetSquadLimits(squad.Limits{MaxConvocations: cfg.Squad.MaxConvocations, TokenBudget: cfg.Squad.TokenBudget})
 	ag.SetSubagentTimeout(cfg.Agent.SubagentTimeoutDuration)
+	if rtkDet != nil && rtkDet.Available() {
+		ag.SetRtkDetector(rtkDet)
+	}
 	ag.AttachTaskTool()
 	ag.AttachSquadKickoffTool()
 	ag.AttachAskUserTool()
@@ -128,6 +140,12 @@ func main() {
 	}
 	if resumed.Mode != "" && resumed.Mode != cfg.Squad.DefaultMode {
 		if err := ag.ActivateMode(resumed.Mode); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	}
+	if resumed.Permission != "" {
+		if err := ag.SetPermission(resumed.Permission); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -221,6 +239,7 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	fmt.Print(doctorLimitsLines(cfg))
 	fmt.Printf("  typesafe api key: %s\n", display(cfg.Typesafe.APIKey))
 	fmt.Print(doctorRoutingLines(cfg))
+	fmt.Print(doctorRtkLines(cfg))
 	fmt.Println()
 
 	fmt.Printf("catalog: %d models, default %s\n", len(cat.Models), cat.DefaultModel)
@@ -308,6 +327,25 @@ func doctorRoutingLines(cfg *config.Config) string {
 		model = "auto"
 	}
 	fmt.Fprintf(&b, "  model: %s\n", model)
+	return b.String()
+}
+
+func doctorRtkLines(cfg *config.Config) string {
+	var b strings.Builder
+	enabled := "no"
+	if cfg.RTK.EnabledVal() {
+		enabled = "yes"
+	}
+	fmt.Fprintf(&b, "  rtk enabled: %s\n", enabled)
+	if !cfg.RTK.EnabledVal() {
+		return b.String()
+	}
+	det := rtk.Detector{}
+	if det.Available() {
+		fmt.Fprintln(&b, "  rtk binary: found")
+	} else {
+		fmt.Fprintln(&b, "  rtk binary: not found (install with: brew install rtk)")
+	}
 	return b.String()
 }
 

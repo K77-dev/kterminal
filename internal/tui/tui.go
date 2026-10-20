@@ -799,6 +799,12 @@ func (m Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "alt+tab":
+		return m.togglePermission()
+	case "tab":
+		if strings.TrimSpace(m.input.Value()) == "" {
+			return m.togglePermission()
+		}
 	case "esc":
 		if m.busy {
 			m.agent.Cancel()
@@ -1121,8 +1127,10 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		lines := []string{
 			"/config — configure gateway and API keys",
 			"/router [status|jev|laya|on|off] — show state or switch the routing engine",
+			"/rtk [status|on|off] — rtk token compression for bash output",
 			"/model <name> — pin a model, persisted across restarts · /model auto — let the router decide",
 			"/mode — switch between sdd and squad modes",
+			"tab / alt+tab — switch between plan (research only) and build (full toolset)",
 			"/bg — background processes",
 			"/image <path> — attach an image · /image — list pending · /unimage <n> — remove",
 			"/clear — clear the conversation",
@@ -1158,6 +1166,8 @@ func (m Model) handleCommand(cmdline string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/router":
 		return m.handleRouterCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
+	case "/rtk":
+		return m.handleRtkCommand(strings.TrimSpace(strings.TrimPrefix(cmdline, cmd)))
 	case "/mode":
 		m.openModePopup()
 		return m, nil
@@ -1567,6 +1577,9 @@ func (m Model) hintBar() string {
 	}
 	if s := m.agent.ActiveSkill(); s != "" {
 		segments = append(segments, primaryStyle.Render("skill "+s))
+	}
+	if m.agent.Permission() == agent.PermissionPlan {
+		segments = append(segments, planModeStyle.Render("plan"))
 	}
 	if n := m.bgCount(); n > 0 {
 		segments = append(segments, primaryStyle.Render(fmt.Sprintf("bg %d", n)))

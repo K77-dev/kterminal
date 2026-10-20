@@ -450,7 +450,7 @@ func TestCommandPopupListsNativeAndKspec(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected command popup open after typing /")
 	}
-	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/router", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/kspec-bootstrap", "/kspec-bugfix", "/kspec-ideia", "/kspec-implement", "/kspec-pr-review", "/kspec-prd", "/kspec-qa", "/kspec-tasks", "/kspec-techspec", "/kspec-version", "/mode", "/model", "/quit", "/router", "/rtk", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -529,7 +529,7 @@ func TestCommandPopupWithoutStoreListsNativesOnly(t *testing.T) {
 	if !m.cmdOpen {
 		t.Fatal("expected popup open after typing /")
 	}
-	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/unimage"}
+	want := []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/rtk", "/unimage"}
 	if strings.Join(m.cmdItems, "|") != strings.Join(want, "|") {
 		t.Fatalf("items = %v, want %v", m.cmdItems, want)
 	}
@@ -673,6 +673,113 @@ func TestBgPopupKeyRouting(t *testing.T) {
 	}
 	if !m.bgOpen {
 		t.Fatal("typing must not close the popup")
+	}
+}
+
+func TestTabTogglesPermission(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("default permission = %q, want build", got)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if got := ag.Permission(); got != agent.PermissionPlan {
+		t.Fatalf("permission after tab = %q, want plan", got)
+	}
+	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "plan") {
+		t.Fatalf("hint bar missing the plan segment:\n%s", hint)
+	}
+	plain := stripANSI(m.View())
+	if !strings.Contains(plain, "plan mode — research and plan only") {
+		t.Fatalf("view missing the plan announcement:\n%s", plain)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("permission after second tab = %q, want build", got)
+	}
+	if hint := stripANSI(m.hintBar()); strings.Contains(hint, "plan") {
+		t.Fatalf("hint bar must drop the plan segment in build:\n%s", hint)
+	}
+}
+
+func TestAltTabTogglesPermissionWithTextInInput(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix the bug")})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab, Alt: true})
+	if got := ag.Permission(); got != agent.PermissionPlan {
+		t.Fatalf("alt+tab with text in the input = %q, want plan", got)
+	}
+	if got := m.input.Value(); got != "fix the bug" {
+		t.Fatalf("alt+tab must not touch the input, got %q", got)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab, Alt: true})
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("alt+tab back = %q, want build", got)
+	}
+}
+
+func TestTabWithTextDoesNotToggle(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("plan this")})
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("tab with text in the input = %q, want build (no toggle)", got)
+	}
+}
+
+func TestTabToggleInertInSquad(t *testing.T) {
+	gw, _ := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("ActivateMode: %v", err)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("tab in squad mode = %q, want build (inert)", got)
+	}
+	plain := stripANSI(m.View())
+	if !strings.Contains(plain, "/mode") {
+		t.Fatalf("view missing the squad hint after tab:\n%s", plain)
+	}
+}
+
+func TestPlanModeBlocksMutatingToolCall(t *testing.T) {
+	gw, bodies := captureGateway(t)
+	m, ag := newKspecAgentModel(t, gw.URL)
+	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if err := ag.SetPermission(agent.PermissionPlan); err != nil {
+		t.Fatalf("SetPermission: %v", err)
+	}
+
+	m.input.SetValue("refactor the parser")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pumpUntilEvent(t, m, ag.Events, func(e agent.Event) bool {
+		return e.Kind == agent.EventTurnDone && e.Depth == 0
+	})
+
+	select {
+	case body := <-bodies:
+		if strings.Contains(body, "\"write\"") || strings.Contains(body, "\"edit\"") || strings.Contains(body, "\"bash\"") {
+			t.Fatalf("plan mode must not offer mutating tools to the model:\n%s", body)
+		}
+	default:
+	}
+
+	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "plan") {
+		t.Fatalf("hint bar missing the plan segment:\n%s", hint)
 	}
 }
 

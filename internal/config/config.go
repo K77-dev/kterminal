@@ -61,6 +61,17 @@ type Squad struct {
 	Pins            map[string]string `toml:"pins"`
 }
 
+type RTK struct {
+	Enabled *bool `toml:"enabled"`
+}
+
+func (r RTK) EnabledVal() bool {
+	if r.Enabled == nil {
+		return true
+	}
+	return *r.Enabled
+}
+
 type Config struct {
 	Model    string   `toml:"model"`
 	LLM      LLM      `toml:"llm"`
@@ -68,6 +79,7 @@ type Config struct {
 	Router   Router   `toml:"router"`
 	Squad    Squad    `toml:"squad"`
 	Agent    Agent    `toml:"agent"`
+	RTK      RTK      `toml:"rtk"`
 }
 
 const (
@@ -166,6 +178,13 @@ func Load() (*Config, error) {
 	if v := os.Getenv("KTERMINAL_MODEL"); v != "" {
 		cfg.Model = v
 	}
+	if v := os.Getenv("KTERMINAL_RTK_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid rtk.enabled %q: %w", v, err)
+		}
+		cfg.RTK.Enabled = &enabled
+	}
 	if cfg.Squad.DefaultMode == "" {
 		cfg.Squad.DefaultMode = defaultMode
 	}
@@ -226,6 +245,10 @@ func (c *Config) Save() error {
 	if c.Router.Enabled == nil {
 		enabled := true
 		c.Router.Enabled = &enabled
+	}
+	if c.RTK.Enabled == nil {
+		enabled := true
+		c.RTK.Enabled = &enabled
 	}
 	if c.Router.Engine == "" {
 		c.Router.Engine = "jev"

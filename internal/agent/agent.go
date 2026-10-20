@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
 	"kterminal/internal/router"
+	"kterminal/internal/rtk"
 	"kterminal/internal/session"
 	"kterminal/internal/squad"
 	"kterminal/internal/telemetry"
@@ -111,6 +113,7 @@ type Agent struct {
 	activeSkill       string
 	systemPrompt      string
 	mode              string
+	permission        string
 	lastPromptTokens  int64
 	lastEstimateChars int
 	candidates        []catalog.Model
@@ -133,6 +136,7 @@ type Agent struct {
 	squadLimits       squad.Limits
 	mesa              *squad.Mesa
 	modelHealth       *modelHealth
+	rtkDetector       *rtk.Detector
 }
 
 func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *catalog.Catalog, reg *tools.Registry, sess *session.Writer, confirm bool) *Agent {
@@ -167,6 +171,8 @@ func (a *Agent) SetRouters(r router.Router, fallback router.Router) {
 }
 
 func (a *Agent) SetSubagentTimeout(d time.Duration) { a.subagentTimeout = d }
+
+func (a *Agent) SetRtkDetector(det *rtk.Detector) { a.rtkDetector = det }
 
 func (a *Agent) Reset() {
 	a.messages = nil
@@ -203,16 +209,34 @@ func (a *Agent) SquadStore() *squad.Store {
 	return a.squadStore
 }
 
+const (
+	ModeSDD   = "sdd"
+	ModeSquad = "squad"
+)
+
+const (
+	PermissionBuild = "build"
+	PermissionPlan  = "plan"
+)
+
+func validMode(mode string) bool {
+	return mode == ModeSDD || mode == ModeSquad
+}
+
+func validPermission(p string) bool {
+	return p == "" || p == PermissionBuild || p == PermissionPlan
+}
+
 func (a *Agent) ActivateMode(mode string) error {
 	if a.turnRunning() {
 		return errTurnActive
 	}
-	if mode != "sdd" && mode != "squad" {
-		return fmt.Errorf("invalid mode %q: must be \"sdd\" or \"squad\"", mode)
+	if !validMode(mode) {
+		return fmt.Errorf("invalid mode %q: must be %q or %q", mode, ModeSDD, ModeSquad)
 	}
 	a.mode = mode
 	a.rebuildSystemPrompt()
-	if mode == "squad" {
+	if mode == ModeSquad {
 		a.initMesa()
 	}
 	return nil
@@ -220,9 +244,48 @@ func (a *Agent) ActivateMode(mode string) error {
 
 func (a *Agent) Mode() string {
 	if a.mode == "" {
-		return "sdd"
+		return ModeSDD
 	}
 	return a.mode
+}
+
+// SetPermission sets the plan/build permission layer. Empty means build.
+func (a *Agent) SetPermission(p string) error {
+	if a.turnRunning() {
+		return errTurnActive
+	}
+	if !validPermission(p) {
+		return fmt.Errorf("invalid permission %q: must be %q or %q", p, PermissionBuild, PermissionPlan)
+	}
+	a.permission = p
+	a.rebuildSystemPrompt()
+	return nil
+}
+
+func (a *Agent) Permission() string {
+	if a.permission == "" {
+		return PermissionBuild
+	}
+	return a.permission
+}
+
+// TogglePermission switches between plan and build. It is a no-op (with a
+// user-facing hint) while the squad mesa is active.
+func (a *Agent) TogglePermission() (string, error) {
+	if a.turnRunning() {
+		return "", errTurnActive
+	}
+	if a.Mode() == ModeSquad {
+		return "", errors.New("squad mode is active — switch modes with /mode")
+	}
+	next := PermissionBuild
+	if a.Permission() == PermissionBuild {
+		next = PermissionPlan
+	}
+	if err := a.SetPermission(next); err != nil {
+		return "", err
+	}
+	return next, nil
 }
 
 func (a *Agent) EnqueueUserMessage(text string) {
@@ -336,7 +399,7 @@ func (a *Agent) writeSnapshot() {
 	if a.depth > 0 {
 		return
 	}
-	a.Session.WriteSnapshot(a.messages, a.activeSkill, a.mode, a.Mesa())
+	a.Session.WriteSnapshot(a.messages, a.activeSkill, a.mode, a.permission, a.Mesa())
 }
 
 func (a *Agent) Run(userInput string) {
@@ -601,9 +664,13 @@ func (a *Agent) newSubagent(description, guidance string) *Agent {
 		modelHealth:     a.modelHealth,
 		ready:           a.LLM != nil,
 		now:             a.now,
+		rtkDetector:     a.rtkDetector,
 	}
 	if a.Tools != nil {
 		sub.Tools.SetProcMon(a.Tools.ProcMon())
+	}
+	if a.rtkDetector != nil {
+		sub.Tools.SetRtkDetector(a.rtkDetector)
 	}
 	sub.messages = []llm.Message{
 		{Role: "system", Content: subagentSystemPrompt},
@@ -786,7 +853,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 	}
 	for step := 0; step < limit; step++ {
 		partial.Reset()
-		if a.depth == 0 && a.mode == "squad" {
+		if a.depth == 0 && a.mode == ModeSquad {
 			if msgs := a.drainUserQueue(); len(msgs) > 0 {
 				for _, msg := range msgs {
 					a.messages = append(a.messages, llm.Message{Role: "user", Content: msg})
@@ -1018,8 +1085,8 @@ func modelsByProbabilityDesc(probs map[string]float64) []string {
 }
 
 func (a *Agent) executeTool(ctx context.Context, name, argsJSON string) (tools.Result, error) {
-	if a.squadBlocksTool(name) {
-		return tools.Result{}, fmt.Errorf("squad mode: the maestro never executes work itself (tool %q blocked). Deliberate via task with persona after squad_kickoff; execute the converged plan via task without persona — subagents carry the full toolset", name)
+	if reason := a.toolBlocked(name); reason != "" {
+		return tools.Result{}, fmt.Errorf("%s", reason)
 	}
 	clock := a.now
 	if clock == nil {
@@ -1035,7 +1102,7 @@ func (a *Agent) maestroActive() bool {
 	a.mu.Lock()
 	active := a.kickoff != nil
 	a.mu.Unlock()
-	return active || a.mode == "squad"
+	return active || a.mode == ModeSquad
 }
 
 func (a *Agent) maestroRestricted() bool {
@@ -1046,14 +1113,44 @@ func (a *Agent) squadBlocksTool(name string) bool {
 	return a.maestroRestricted() && name != taskToolName && a.Tools.IsMutating(name)
 }
 
+// planRestricted reports whether this agent runs under the plan permission:
+// research and planning only, no side effects.
+func (a *Agent) planRestricted() bool {
+	return a.Permission() == PermissionPlan
+}
+
+// planBlocksTool blocks every mutating tool and subagent delegation while in
+// plan mode — the agent researches and plans, it never executes. The squad
+// mesa governs itself (it needs task to convoke personas), so the plan layer
+// stays inert while the maestro is active.
+func (a *Agent) planBlocksTool(name string) bool {
+	if !a.planRestricted() || a.maestroActive() {
+		return false
+	}
+	return a.Tools.IsMutating(name) || name == taskToolName
+}
+
+func (a *Agent) toolBlocked(name string) string {
+	if a.squadBlocksTool(name) {
+		return "squad mode: the maestro never executes work itself (tool " + strconv.Quote(name) + " blocked). Deliberate via task with persona after squad_kickoff; execute the converged plan via task without persona — subagents carry the full toolset"
+	}
+	if a.planBlocksTool(name) {
+		return "plan mode: " + strconv.Quote(name) + " is blocked — research with read/glob/grep and present a plan; switch to build mode to execute it"
+	}
+	return ""
+}
+
 func (a *Agent) toolDefinitions() []llm.Tool {
 	defs := a.Tools.Definitions()
-	if !a.maestroRestricted() {
+	blocked := func(name string) bool {
+		return a.squadBlocksTool(name) || a.planBlocksTool(name)
+	}
+	if !a.maestroRestricted() && !a.planRestricted() {
 		return defs
 	}
 	out := make([]llm.Tool, 0, len(defs))
 	for _, d := range defs {
-		if a.squadBlocksTool(d.Function.Name) {
+		if blocked(d.Function.Name) {
 			continue
 		}
 		out = append(out, d)

@@ -616,6 +616,186 @@ func TestMaestroActive(t *testing.T) {
 	}
 }
 
+func TestPlanBlocksToolGating(t *testing.T) {
+	cases := []struct {
+		name       string
+		setup      func(*Agent)
+		tool       string
+		blocked    bool
+		wantReason string
+	}{
+		{
+			name:       "plan blocks write",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:       "write",
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:       "plan blocks edit",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:       "edit",
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:       "plan blocks bash",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:       "bash",
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:       "plan blocks kspec_bootstrap",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:       "kspec_bootstrap",
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:       "plan blocks task delegation",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:       taskToolName,
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:    "plan keeps read",
+			setup:   func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:    "read",
+			blocked: false,
+		},
+		{
+			name:    "plan keeps glob",
+			setup:   func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:    "glob",
+			blocked: false,
+		},
+		{
+			name:    "plan keeps grep",
+			setup:   func(ag *Agent) { ag.permission = PermissionPlan },
+			tool:    "grep",
+			blocked: false,
+		},
+		{
+			name:    "build keeps write",
+			setup:   func(ag *Agent) { ag.permission = PermissionBuild },
+			tool:    "write",
+			blocked: false,
+		},
+		{
+			name:    "build keeps task",
+			setup:   func(ag *Agent) { ag.permission = PermissionBuild },
+			tool:    taskToolName,
+			blocked: false,
+		},
+		{
+			name:    "plan stays inert while the mesa is active",
+			setup:   func(ag *Agent) { ag.permission = PermissionPlan; ag.mode = ModeSquad },
+			tool:    taskToolName,
+			blocked: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+			tc.setup(ag)
+			if got := ag.planBlocksTool(tc.tool); got != tc.blocked {
+				t.Fatalf("planBlocksTool(%q) = %v, want %v", tc.tool, got, tc.blocked)
+			}
+			reason := ag.toolBlocked(tc.tool)
+			if tc.blocked && !strings.Contains(reason, tc.wantReason) {
+				t.Fatalf("toolBlocked(%q) = %q, want it to mention %q", tc.tool, reason, tc.wantReason)
+			}
+			if !tc.blocked && reason != "" {
+				t.Fatalf("toolBlocked(%q) = %q, want empty", tc.tool, reason)
+			}
+		})
+	}
+}
+
+func TestPlanToolDefinitionsFiltered(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.permission = PermissionPlan
+	names := map[string]bool{}
+	for _, d := range ag.toolDefinitions() {
+		names[d.Function.Name] = true
+	}
+	for _, want := range []string{"read", "glob", "grep"} {
+		if !names[want] {
+			t.Fatalf("plan tool definitions missing %q: %v", want, names)
+		}
+	}
+	for _, banned := range []string{"write", "edit", "bash", "kspec_bootstrap", taskToolName} {
+		if names[banned] {
+			t.Fatalf("plan tool definitions must not expose %q: %v", banned, names)
+		}
+	}
+}
+
+func TestTogglePermission(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachKspec(kspec.Load())
+	if got := ag.Permission(); got != PermissionBuild {
+		t.Fatalf("default permission = %q, want build", got)
+	}
+	next, err := ag.TogglePermission()
+	if err != nil || next != PermissionPlan {
+		t.Fatalf("toggle = (%q, %v), want (plan, nil)", next, err)
+	}
+	if !strings.Contains(ag.systemPrompt, "Plan mode active") {
+		t.Fatalf("system prompt missing the plan addendum: %q", ag.systemPrompt)
+	}
+	next, err = ag.TogglePermission()
+	if err != nil || next != PermissionBuild {
+		t.Fatalf("toggle back = (%q, %v), want (build, nil)", next, err)
+	}
+	if strings.Contains(ag.systemPrompt, "Plan mode active") {
+		t.Fatalf("plan addendum must leave the prompt after toggling back: %q", ag.systemPrompt)
+	}
+
+	if err := ag.SetPermission("nonsense"); err == nil {
+		t.Fatal("SetPermission(nonsense) must fail")
+	}
+	if err := ag.SetPermission(""); err != nil {
+		t.Fatalf("SetPermission(\"\") = %v, want nil (build)", err)
+	}
+	if got := ag.Permission(); got != PermissionBuild {
+		t.Fatalf("empty permission = %q, want build", got)
+	}
+}
+
+func TestTogglePermissionInertInSquad(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.mode = ModeSquad
+	next, err := ag.TogglePermission()
+	if err == nil {
+		t.Fatal("toggle in squad mode must fail")
+	}
+	if !strings.Contains(err.Error(), "/mode") {
+		t.Fatalf("toggle error = %q, want it to point at /mode", err)
+	}
+	if next != "" {
+		t.Fatalf("toggle in squad = %q, want empty", next)
+	}
+	if got := ag.Permission(); got != PermissionBuild {
+		t.Fatalf("permission changed in squad mode: %q", got)
+	}
+}
+
+func TestTogglePermissionBlockedMidTurn(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.mu.Lock()
+	ag.turnActive = true
+	ag.mu.Unlock()
+	if _, err := ag.TogglePermission(); err == nil {
+		t.Fatal("toggle mid-turn must fail")
+	}
+	if err := ag.SetPermission(PermissionPlan); err == nil {
+		t.Fatal("SetPermission mid-turn must fail")
+	}
+}
+
 func TestSquadBlocksToolGating(t *testing.T) {
 	cases := []struct {
 		name    string

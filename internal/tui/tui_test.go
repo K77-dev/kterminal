@@ -3604,6 +3604,62 @@ func TestResumeContinueRebuildsSquadPanel(t *testing.T) {
 	}
 }
 
+func TestResumeRestoresPlanPermission(t *testing.T) {
+	gw, _ := captureGateway(t)
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	w, err := session.NewWriter()
+	if err != nil {
+		t.Fatalf("session writer: %v", err)
+	}
+	t.Cleanup(func() { w.Close() })
+	messages := []llm.Message{
+		{Role: "user", Content: "plan the refactor"},
+		{Role: "assistant", Content: "the plan is ready"},
+	}
+	if err := w.WriteSnapshot(messages, "", "", agent.PermissionPlan, nil); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	snap, err := session.Load(w.Path())
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if snap.Permission != agent.PermissionPlan {
+		t.Fatalf("snapshot permission = %q, want plan", snap.Permission)
+	}
+
+	ag := agent.New(llm.New(gw.URL, "gw-key", false), nil, nil, cat, tools.NewRegistry(), nil, false)
+	ag.SetMessages(snap.Messages)
+	if err := ag.SetPermission(snap.Permission); err != nil {
+		t.Fatalf("restore permission: %v", err)
+	}
+	if got := ag.Permission(); got != agent.PermissionPlan {
+		t.Fatalf("restored permission = %q, want plan", got)
+	}
+
+	m := New(ag, &config.Config{}, cat, true, WithResumed(snap.Messages))
+	m = step(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "plan") {
+		t.Fatalf("resumed hint bar missing the plan segment:\n%s", hint)
+	}
+
+	// A pre-feature snapshot without the permission field must resume as build.
+	legacy := `{"type":"snapshot","messages":[{"role":"user","content":"legacy"}],"skill":"","mode":"","permission":""}` + "\n"
+	legacyPath := filepath.Join(t.TempDir(), "legacy.jsonl")
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy transcript: %v", err)
+	}
+	legacySnap, err := session.Load(legacyPath)
+	if err != nil {
+		t.Fatalf("load legacy snapshot: %v", err)
+	}
+	if legacySnap.Permission != "" {
+		t.Fatalf("legacy snapshot permission = %q, want empty (build)", legacySnap.Permission)
+	}
+}
+
 func TestResumePreFeatureSnapshotRendersMesaNotStarted(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	if err := os.MkdirAll(session.Dir(), 0o755); err != nil {

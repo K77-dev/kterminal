@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"kterminal/internal/agent"
 	"kterminal/internal/kspec"
 	"kterminal/internal/procmon"
 	"kterminal/internal/router"
@@ -19,11 +20,34 @@ const maxHelpLineRunes = 72
 const kspecKickoffPrefix = "Begin the "
 const kspecKickoffSuffix = " workflow now."
 
-var nativeCommands = []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/unimage"}
+var nativeCommands = []string{"/bg", "/clear", "/config", "/exit", "/help", "/image", "/mode", "/model", "/quit", "/router", "/rtk", "/unimage"}
 
 var modeOptions = []string{"sdd", "squad"}
 
 const modeCommand = "/mode"
+
+// togglePermission switches between plan and build (opencode-style Tab /
+// Alt+Tab). In squad mode it is inert and shows a hint instead.
+func (m Model) togglePermission() (tea.Model, tea.Cmd) {
+	next, err := m.agent.TogglePermission()
+	if err != nil {
+		m.blocks = append(m.blocks, warningStyle.Render(err.Error()))
+		m.refreshContent()
+		return m, nil
+	}
+	m.blocks = append(m.blocks, permissionBlock(next))
+	m.refreshContent()
+	return m, nil
+}
+
+func permissionBlock(permission string) string {
+	switch permission {
+	case agent.PermissionPlan:
+		return planModeStyle.Render("◐ plan mode — research and plan only; tab to switch to build")
+	default:
+		return buildModeStyle.Render("◆ build mode — full toolset; tab to switch to plan")
+	}
+}
 
 func (m *Model) closeCommandPopup() {
 	m.cmdOpen = false
@@ -361,6 +385,51 @@ func (m Model) modelPopupView() string {
 		}
 	}
 	return mentionPopupStyle.Render(b.String())
+}
+
+func (m Model) handleRtkCommand(arg string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(arg)
+	switch {
+	case len(parts) == 0 || (len(parts) == 1 && parts[0] == "status"):
+		return m.showRtkStatus()
+	case len(parts) == 1 && parts[0] == "on":
+		return m.applyRtkState(true)
+	case len(parts) == 1 && parts[0] == "off":
+		return m.applyRtkState(false)
+	default:
+		m.blocks = append(m.blocks, errorBox("unknown rtk command "+strings.Join(parts, " ")+" — /rtk [status|on|off]"))
+		m.refreshContent()
+		return m, nil
+	}
+}
+
+func (m Model) showRtkStatus() (tea.Model, tea.Cmd) {
+	enabled := "no"
+	if m.cfg.RTK.EnabledVal() {
+		enabled = "yes"
+	}
+	m.blocks = append(m.blocks, resultStyle.Render("rtk: "+enabled))
+	m.refreshContent()
+	return m, nil
+}
+
+func (m Model) applyRtkState(enabled bool) (tea.Model, tea.Cmd) {
+	previous := m.cfg.RTK.Enabled
+	m.cfg.RTK.Enabled = &enabled
+	if err := m.cfg.Save(); err != nil {
+		m.cfg.RTK.Enabled = previous
+		m.blocks = append(m.blocks, errorBox("failed to save config: "+err.Error()))
+		m.refreshContent()
+		return m, nil
+	}
+	label := "rtk off"
+	if enabled {
+		label = "rtk on"
+	}
+	m.blocks = append(m.blocks, primaryStyle.Render(label))
+	m.blocks = append(m.blocks, resultStyle.Render("config saved — restart kterminal to apply"))
+	m.refreshContent()
+	return m, nil
 }
 
 func (m Model) handleRouterCommand(arg string) (tea.Model, tea.Cmd) {

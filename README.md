@@ -25,6 +25,7 @@ $ go run .
   - [FAQ — as perguntas que todo mundo faz](#faq--as-perguntas-que-todo-mundo-faz)
 - [Roteamento de modelo](#roteamento-de-modelo)
 - [Processos em background](#processos-em-background)
+- [rtk (compressão de output)](#rtk-compressão-de-output)
 - [Sob o capô](#sob-o-capô)
 - [Comandos](#comandos)
 - [Solução de problemas](#solução-de-problemas)
@@ -318,7 +319,7 @@ $ kterminal --doctor
 - `/model <nome>` — pina um modelo manualmente (persiste na config, aparece como `⚑` no hint bar) · `/model auto` devolve a decisão à engine.
 - Env override: `KTERMINAL_ROUTER=laya` (mesmo padrão dos demais overrides).
 
-O hint bar mostra o estado: modelo atual (com `⚑` quando pinado), custo da sessão, tokens/s medidos, contador `bg N` e `jev off`/`laya off` quando o roteamento está desligado.
+O hint bar mostra o estado: modelo atual (com `⚑` quando pinado), custo da sessão, tokens/s medidos, contador `bg N`, `plan` quando a camada de permissão está em plan, e `jev off`/`laya off` quando o roteamento está desligado.
 
 ## Processos em background
 
@@ -329,6 +330,27 @@ Comandos longos (dev servers, watchers, builds) não prendem mais o agente:
 ```
 
 A tool `bash` retorna imediato e o processo segue rodando em grupo próprio (grace de 250ms para falhas de startup). O rodapé mostra `bg N`; o popup **`/bg`** lista os processos com uptime e permite parar cada um individualmente (`↑↓` move, `enter` para, `esc` fecha). Na saída do kterminal — normal, erro ou SIGTERM/SIGINT — todos recebem TERM→KILL com budget de join.
+
+---
+
+## rtk (compressão de output)
+
+O **rtk** (Rust Token Killer) é um CLI externo que reescreve comandos shell para comprimir a saída, reduzindo o consumo de tokens do LLM em 60–90%. Quando instalado e habilitado, toda chamada da tool `bash` passa por `rtk rewrite "<cmd>"` antes da execução — o comando reescrito vai ao shell e o output comprimido volta ao agente.
+
+```toml
+# ~/.config/kterminal/config.toml
+[rtk]
+enabled = true   # padrão; false desliga o rewrite
+```
+
+- **Detecção automática**: se o binário `rtk` não está no PATH, o agente funciona normalmente sem rewrite.
+- **Comandos simples apenas**: pipes, redirecionamento, substitution e heredocs não são reescritos — vão direto ao shell.
+- **Best-effort**: se `rtk rewrite` falhar ou timeout (3s), o comando original é executado.
+- **Propagação**: subagentes (personas do squad e executores) herdam o rtk automaticamente.
+- Env override: `KTERMINAL_RTK_ENABLED=false`.
+- `/rtk` ou `/rtk status` mostra o estado; `/rtk on` / `/rtk off` toggle e persistem (reinicie para aplicar).
+
+Instalação: `brew install rtk` (ou ver https://github.com/rtk-ai/rtk).
 
 ---
 
@@ -366,8 +388,9 @@ A tool `bash` retorna imediato e o processo segue rodando em grupo próprio (gra
 | Caminho | Responsabilidade |
 |---|---|
 | `internal/procmon/` | Manager de processos background: spawn em grupo próprio, watcher, `Stop` TERM→KILL, `KillAll` idempotente |
-| `internal/tools/bash.go` | Tool `bash` com `run_in_background` |
-| `internal/tui/commands.go` | Comandos `/router`, `/model`, `/bg`, popups |
+| `internal/tools/bash.go` | Tool `bash` com `run_in_background` e rewrite via rtk |
+| `internal/rtk/rtk.go` | Detector do binário rtk (cache thread-safe) e `Rewrite` (best-effort, skip metacaracteres) |
+| `internal/tui/commands.go` | Comandos `/router`, `/model`, `/bg`, `/rtk`, popups, toggle plan/build (`tab`/`alt+tab`) |
 | `internal/tools/graphify.go` | Tool read-only de consulta ao knowledge graph (`graphify-out/graph.json`) |
 
 Decisões de projeto: sem novo loop em Go — o squad mode é **prompt-driven** sobre a maquinaria de subagentes existente; assets via `go:embed`; mesa thread-safe (`sync.Mutex`) porque os eventos chegam de goroutines de subagentes; engines de rota plugáveis atrás da interface `Router` (o wiring vive em `WireWith`, não no agente).
@@ -402,12 +425,18 @@ A mesa não vive fora do processo do repo: personas leem artefatos de `spec/` co
 | Comando | Ação |
 |---|---|
 | `/mode` | Alterna entre `sdd` e `squad` (popup) |
+| `tab` / `alt+tab` | Alterna entre `plan` (só pesquisa e planeja) e `build` (toolset completo) |
 | `/router [status\|jev\|laya\|on\|off]` | Estado do roteamento ou troca de engine |
 | `/model <nome>` | Pina um modelo (persistente) · `/model auto` devolve à engine |
 | `/bg` | Popup de processos em background (parar individualmente) |
+| `/rtk [status\|on\|off]` | Estado do rtk ou liga/desliga o rewrite de comandos |
 | `/config` | Abre a configuração (gateway, keys, engine, modelo) |
 | `/help` | Lista de comandos |
 | `/clear`, `/image`, `/unimage`, `/exit` | Sessão e anexos |
+
+## Plan × Build
+
+Camada de permissão independente do modo (estilo opencode): **plan** deixa o agente pesquisar (`read`/`glob`/`grep`), perguntar (`ask_user`) e entregar um plano — `write`, `edit`, `bash`, `kspec_bootstrap` e `task` ficam bloqueados (nem são oferecidos ao modelo). **build** devolve o toolset completo. A troca é instantânea com `tab` (input vazio) ou `alt+tab` (a qualquer momento), aparece no hint bar (`plan`) e persiste no snapshot do resume. Em squad mode o atalho é inerte — a mesa governa a si mesma e o aviso aponta para `/mode`.
 
 ## Solução de problemas
 

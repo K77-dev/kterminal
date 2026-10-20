@@ -738,6 +738,123 @@ token_budget = 200000
 	}
 }
 
+func TestLoadRtkDefaultsToEnabled(t *testing.T) {
+	writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RTK.Enabled != nil {
+		t.Errorf("Enabled = %v, want nil for default", *cfg.RTK.Enabled)
+	}
+	if !cfg.RTK.EnabledVal() {
+		t.Error("EnabledVal() = false, want true for nil default")
+	}
+}
+
+func TestLoadRtkExplicitTOML(t *testing.T) {
+	writeTestConfig(t, `
+[rtk]
+enabled = false
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RTK.Enabled == nil {
+		t.Fatal("Enabled = nil, want explicit false")
+	}
+	if *cfg.RTK.Enabled {
+		t.Error("*Enabled = true, want false")
+	}
+	if cfg.RTK.EnabledVal() {
+		t.Error("EnabledVal() = true, want false for explicit false")
+	}
+}
+
+func TestLoadRtkEnvOverridesFile(t *testing.T) {
+	writeTestConfig(t, `
+[rtk]
+enabled = true
+`)
+	t.Setenv("KTERMINAL_RTK_ENABLED", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RTK.Enabled == nil {
+		t.Fatal("Enabled = nil, want explicit false from env")
+	}
+	if *cfg.RTK.Enabled {
+		t.Error("*Enabled = true, want false from env")
+	}
+}
+
+func TestLoadRtkEnvInvalidRejected(t *testing.T) {
+	writeTestConfig(t, "")
+	t.Setenv("KTERMINAL_RTK_ENABLED", "maybe")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid KTERMINAL_RTK_ENABLED, got nil")
+	}
+	if !strings.Contains(err.Error(), "rtk.enabled") {
+		t.Errorf("error %q missing key rtk.enabled", err)
+	}
+}
+
+func TestSaveMaterializesRtkSection(t *testing.T) {
+	path := writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "[rtk]") {
+		t.Errorf("saved config missing [rtk] section:\n%s", content)
+	}
+	if !strings.Contains(content, "enabled = true") {
+		t.Errorf("saved config missing enabled = true:\n%s", content)
+	}
+}
+
+func TestSaveRtkRoundTripPreservesExplicitFalse(t *testing.T) {
+	writeTestConfig(t, `
+[rtk]
+enabled = false
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RTK.EnabledVal() {
+		t.Fatal("EnabledVal() = true before Save, want false")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "enabled = false") {
+		t.Errorf("saved config missing enabled = false:\n%s", string(data))
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RTK.EnabledVal() {
+		t.Error("EnabledVal() = true after round-trip, want false")
+	}
+}
+
 func TestLoadRouterDefaultsToJev(t *testing.T) {
 	writeTestConfig(t, "")
 	cfg, err := Load()

@@ -8,6 +8,7 @@ import (
 
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
+	"kterminal/internal/rtk"
 )
 
 type Result struct {
@@ -34,6 +35,7 @@ type Registry struct {
 	tools    map[string]Tool
 	order    []string
 	procMon  *procmon.Manager
+	rtkDet   *rtk.Detector
 	OnGoEdit func(path string) string
 }
 
@@ -67,7 +69,20 @@ func (r *Registry) Register(t Tool) {
 
 func (r *Registry) SetProcMon(pm *procmon.Manager) {
 	r.procMon = pm
-	r.Register(bashTool(pm))
+	if r.rtkDet != nil {
+		r.Register(rtkBashTool(pm, r.rtkDet))
+	} else {
+		r.Register(bashTool(pm))
+	}
+}
+
+func (r *Registry) SetRtkDetector(det *rtk.Detector) {
+	r.rtkDet = det
+	if r.procMon != nil {
+		r.Register(rtkBashTool(r.procMon, det))
+	} else {
+		r.Register(rtkBashTool(nil, det))
+	}
 }
 
 func (r *Registry) ProcMon() *procmon.Manager {

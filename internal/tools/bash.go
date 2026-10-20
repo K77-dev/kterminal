@@ -11,6 +11,7 @@ import (
 
 	"kterminal/internal/llm"
 	"kterminal/internal/procmon"
+	"kterminal/internal/rtk"
 )
 
 const bashTimeout = 120 * time.Second
@@ -44,6 +45,41 @@ func bashTool(pm *procmon.Manager) Tool {
 			return runBash(ctx, args, onLine, pm)
 		},
 	}
+}
+
+func rtkBashTool(pm *procmon.Manager, det *rtk.Detector) Tool {
+	t := bashTool(pm)
+	origExec := t.Execute
+	origStream := t.ExecuteStream
+	t.Execute = func(ctx context.Context, args map[string]any) (Result, error) {
+		args = applyRtkRewrite(ctx, args, det)
+		return origExec(ctx, args)
+	}
+	t.ExecuteStream = func(ctx context.Context, args map[string]any, onLine func(string)) (Result, error) {
+		args = applyRtkRewrite(ctx, args, det)
+		return origStream(ctx, args, onLine)
+	}
+	return t
+}
+
+func applyRtkRewrite(ctx context.Context, args map[string]any, det *rtk.Detector) map[string]any {
+	if det == nil || !det.Available() {
+		return args
+	}
+	command, _ := args["command"].(string)
+	if command == "" {
+		return args
+	}
+	rewritten := rtk.Rewrite(ctx, command)
+	if rewritten == command {
+		return args
+	}
+	copied := make(map[string]any, len(args))
+	for k, v := range args {
+		copied[k] = v
+	}
+	copied["command"] = rewritten
+	return copied
 }
 
 func runBash(ctx context.Context, args map[string]any, onLine func(string), pm *procmon.Manager) (Result, error) {

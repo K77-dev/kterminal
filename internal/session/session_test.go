@@ -62,7 +62,7 @@ func TestSnapshotRoundtrip(t *testing.T) {
 		{Role: "tool", ToolCallID: "call_1", Content: "file1\nfile2"},
 	}
 	for _, turn := range [][]llm.Message{turn1, turn2, turn3} {
-		if err := w.WriteSnapshot(turn, "", "", nil); err != nil {
+		if err := w.WriteSnapshot(turn, "", "", "", nil); err != nil {
 			t.Fatalf("write snapshot: %v", err)
 		}
 	}
@@ -105,11 +105,11 @@ func TestLoadUsesLastSnapshot(t *testing.T) {
 		{Role: "assistant", Content: "answer B"},
 	}
 	w.Write(Event{Type: "user", Content: "state A"})
-	if err := w.WriteSnapshot(stateA, "", "", nil); err != nil {
+	if err := w.WriteSnapshot(stateA, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot A: %v", err)
 	}
 	w.Write(Event{Type: "assistant", Content: "answer B"})
-	if err := w.WriteSnapshot(stateB, "", "", nil); err != nil {
+	if err := w.WriteSnapshot(stateB, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot B: %v", err)
 	}
 	got, err := Load(w.Path())
@@ -195,7 +195,7 @@ func TestLoadLatestPicksNewest(t *testing.T) {
 func TestAppendWriterAppends(t *testing.T) {
 	w := newTestWriter(t)
 	first := []llm.Message{{Role: "user", Content: "first turn"}}
-	if err := w.WriteSnapshot(first, "", "", nil); err != nil {
+	if err := w.WriteSnapshot(first, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	original, err := os.ReadFile(w.Path())
@@ -217,7 +217,7 @@ func TestAppendWriterAppends(t *testing.T) {
 		{Role: "user", Content: "first turn"},
 		{Role: "assistant", Content: "second turn"},
 	}
-	if err := aw.WriteSnapshot(second, "", "", nil); err != nil {
+	if err := aw.WriteSnapshot(second, "", "", "", nil); err != nil {
 		t.Fatalf("append snapshot: %v", err)
 	}
 	if err := aw.Close(); err != nil {
@@ -281,7 +281,7 @@ func TestWriteSnapshotOmitsImageParts(t *testing.T) {
 			{Type: "image_url", ImageURL: &llm.ImageURL{URL: uri}},
 		},
 	}}
-	if err := w.WriteSnapshot(messages, "", "", nil); err != nil {
+	if err := w.WriteSnapshot(messages, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -310,7 +310,7 @@ func TestWriteSnapshotKeepsTextParts(t *testing.T) {
 			{Type: "text", Text: "extra"},
 		},
 	}}
-	if err := w.WriteSnapshot(messages, "", "", nil); err != nil {
+	if err := w.WriteSnapshot(messages, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	got, err := Load(w.Path())
@@ -331,7 +331,7 @@ func TestSnapshotCarriesSkill(t *testing.T) {
 		{Role: "user", Content: "run the prd flow"},
 		{Role: "assistant", Content: "done"},
 	}
-	if err := w.WriteSnapshot(messages, "kspec-prd", "", nil); err != nil {
+	if err := w.WriteSnapshot(messages, "kspec-prd", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	snap, err := Load(w.Path())
@@ -346,7 +346,7 @@ func TestSnapshotCarriesSkill(t *testing.T) {
 
 func TestSnapshotOmitsEmptySkill(t *testing.T) {
 	w := newTestWriter(t)
-	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -420,7 +420,7 @@ func TestSnapshotCarriesMode(t *testing.T) {
 		{Role: "user", Content: "design the API"},
 		{Role: "assistant", Content: "squad plan ready"},
 	}
-	if err := w.WriteSnapshot(messages, "", "squad", nil); err != nil {
+	if err := w.WriteSnapshot(messages, "", "squad", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	snap, err := Load(w.Path())
@@ -433,9 +433,49 @@ func TestSnapshotCarriesMode(t *testing.T) {
 	assertMessagesEqual(t, snap.Messages, messages)
 }
 
+func TestSnapshotCarriesPermission(t *testing.T) {
+	w := newTestWriter(t)
+	messages := []llm.Message{
+		{Role: "user", Content: "plan the migration"},
+		{Role: "assistant", Content: "plan ready"},
+	}
+	if err := w.WriteSnapshot(messages, "", "", "plan", nil); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	snap, err := Load(w.Path())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if snap.Permission != "plan" {
+		t.Fatalf("snapshot permission = %q, want plan", snap.Permission)
+	}
+	assertMessagesEqual(t, snap.Messages, messages)
+}
+
+func TestSnapshotOmitsEmptyPermission(t *testing.T) {
+	w := newTestWriter(t)
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", "", nil); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	data, err := os.ReadFile(w.Path())
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if strings.Contains(string(data), `"permission"`) {
+		t.Fatalf("transcript must omit the permission field when empty: %s", data)
+	}
+	snap, err := Load(w.Path())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if snap.Permission != "" {
+		t.Fatalf("snapshot permission = %q, want empty", snap.Permission)
+	}
+}
+
 func TestSnapshotOmitsEmptyMode(t *testing.T) {
 	w := newTestWriter(t)
-	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
@@ -512,7 +552,7 @@ func TestSnapshotRoundtripWithMesa(t *testing.T) {
 		{Role: "assistant", Content: "squad plan ready"},
 	}
 	mesa := populatedMesa()
-	if err := w.WriteSnapshot(messages, "", "squad", mesa); err != nil {
+	if err := w.WriteSnapshot(messages, "", "squad", "", mesa); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	snap, err := Load(w.Path())
@@ -531,7 +571,7 @@ func TestSnapshotRoundtripWithMesa(t *testing.T) {
 
 func TestSnapshotOmitsNilMesa(t *testing.T) {
 	w := newTestWriter(t)
-	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", nil); err != nil {
+	if err := w.WriteSnapshot([]llm.Message{{Role: "user", Content: "hi"}}, "", "", "", nil); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
 	data, err := os.ReadFile(w.Path())
