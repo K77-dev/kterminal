@@ -24,15 +24,17 @@ Este projeto é o **kterminal** — um coding agent de terminal (TUI agêntica) 
 │   ├── agent/                   # Loop agêntico, eventos, subagentes, compactação
 │   ├── catalog/                 # Catálogo de modelos embutido (go:embed models.yaml)
 │   ├── config/                  # Config TOML do usuário (XDG)
+│   ├── globx/                   # Matcher de glob com ** (tool glob + filtro de rules)
 │   ├── jev/                     # Cliente do roteador Jev (Typesafe)
 │   ├── llm/                     # Cliente OpenAI-compatible com streaming
+│   ├── project/                 # Contexto do projeto (AGENTS/CLAUDE/README) + files p/ filtro de rules
 │   ├── router/                  # Interface Router, JevRouter, HeuristicRouter
 │   ├── rtk/                     # Detector e rewrite do rtk (compressão de output)
 │   ├── session/                 # Transcripts JSONL + snapshots para resume
 │   ├── telemetry/               # Store de TPS medido por modelo
 │   ├── tools/                   # Registry + tools fs/bash/diff/diagnostics
 │   └── tui/                     # TUI Bubble Tea, menções, tema, estilos, plan/build (tab)
-├── .docs/                       # Briefs de features (01-10)
+├── .docs/                       # Briefs de features (01-18)
 ├── spec/tasks/                  # Artefatos SDD (PRDs, techspecs, tasks, reviews)
 ├── .agents/                     # kspec: skills, agents, rules, templates (source of truth)
 ├── .claude/ .codex/ .cursor/    # Camadas de discovery do kspec (symlinks/derivados)

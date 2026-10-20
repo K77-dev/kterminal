@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"kterminal/internal/globx"
 	"kterminal/internal/llm"
 )
 
@@ -107,6 +108,7 @@ func expandGlob(pattern string) ([]string, error) {
 		}
 	}
 	var matches []string
+	slashPattern := filepath.ToSlash(pattern)
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -117,7 +119,7 @@ func expandGlob(pattern string) ([]string, error) {
 			}
 			return nil
 		}
-		if matchGlobSegments(segs, strings.Split(filepath.ToSlash(path), "/")) {
+		if globx.Match(slashPattern, filepath.ToSlash(path)) {
 			matches = append(matches, path)
 		}
 		return nil
@@ -126,28 +128,6 @@ func expandGlob(pattern string) ([]string, error) {
 		return nil, err
 	}
 	return matches, nil
-}
-
-func matchGlobSegments(pattern, path []string) bool {
-	if len(pattern) == 0 {
-		return len(path) == 0
-	}
-	if pattern[0] == "**" {
-		for i := 0; i <= len(path); i++ {
-			if matchGlobSegments(pattern[1:], path[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(path) == 0 {
-		return false
-	}
-	ok, err := filepath.Match(pattern[0], path[0])
-	if err != nil || !ok {
-		return false
-	}
-	return matchGlobSegments(pattern[1:], path[1:])
 }
 
 func grepTool() Tool {

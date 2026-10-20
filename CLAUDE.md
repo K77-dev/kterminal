@@ -14,15 +14,17 @@ Este projeto é o **kterminal** — um coding agent de terminal (TUI agêntica) 
 ### Arquitetura
 
 - `main.go` — entry point: flags (`--confirm`, `--continue`, `--session`, `--doctor`), wiring de config/catalog/router/agent/TUI
-- `internal/agent/` — loop agêntico; eventos via canal (`EventRoute`, `EventDelta`, `EventToolStart`, `EventToolResult`, `EventConfirm`, `EventTurnDone`, `EventTurnAborted`, `EventError`); subagentes via tool `task` (limite 10 steps / 5 min); compactação de contexto no limiar de 70% (sumário via `deepseek-v4.1-flash`)
+- `internal/agent/` — loop agêntico; eventos via canal (`EventRoute`, `EventDelta`, `EventToolStart`, `EventToolResult`, `EventConfirm`, `EventTurnDone`, `EventTurnAborted`, `EventError`); subagentes via tool `task` (limite 10 steps / 5 min); compactação de contexto no limiar de 70% (sumário via `deepseek-v4.1-flash`); system prompt com contexto do projeto (AGENTS.md → CLAUDE.md → README.md, cap 16KB), rules filtradas por `paths` do frontmatter (cap 12KB) e decisão de rota cacheada por turn
 - `internal/router/` — interface `Router`; `JevRouter` (API Typesafe systemone, modelo `jev-latest`) com fallback heurístico por keywords
 - `internal/rtk/` — detector do binário rtk (cache thread-safe) e `Rewrite`: reescreve comandos shell via `rtk rewrite` para comprimir output (best-effort, skip metacaracteres)
-- `internal/llm/` — cliente HTTP próprio, OpenAI-compatible, streaming (`POST /v1/chat/completions`, `GET /v1/models`)
+- `internal/llm/` — cliente HTTP próprio, OpenAI-compatible, streaming (`POST /v1/chat/completions`, `GET /v1/models`); cache da lista de modelos em disco (`models-cache.json`, TTL `[llm] models_cache_ttl`, default 15m)
 - `internal/catalog/` — catálogo de modelos embutido via `go:embed models.yaml` (default `glm-5.2`)
+- `internal/globx/` — matcher de glob com `**` (tool `glob` e filtro de rules)
+- `internal/project/` — contexto do projeto (AGENTS/CLAUDE/README) e lista de arquivos para o filtro de rules
 - `internal/tools/` — registry + tools `read`, `glob`, `grep`, `write`, `edit`, `bash`, `task`; diff colorido em write/edit; hook `go vet` pós-edição de `.go` (`diagnostics.go`)
 - `internal/tui/` — TUI Bubble Tea; slash commands (`/quit`, `/exit`, `/help`, `/clear`, `/config`, `/model`, `/image`, `/unimage`); @menções de arquivo; anexo de imagens (5MB, base64); estilo Glamour embutido (`markdown.json`); camada de permissão plan/build alternada com `tab`/`alt+tab` (plan bloqueia tools mutantes e `task`)
 - `internal/session/` — transcripts JSONL + snapshots para resume (`~/.local/share/kterminal/sessions/`)
-- `internal/config/` — config TOML (`~/.config/kterminal/config.toml`, XDG; env vars `KTERMINAL_LLM_BASE_URL`, `KTERMINAL_LLM_API_KEY`, `TYPESAFE_API_KEY`, `KTERMINAL_RTK_ENABLED`)
+- `internal/config/` — config TOML (`~/.config/kterminal/config.toml`, XDG; env vars `KTERMINAL_LLM_BASE_URL`, `KTERMINAL_LLM_API_KEY`, `TYPESAFE_API_KEY`, `KTERMINAL_RTK_ENABLED`, `KTERMINAL_LLM_MODELS_CACHE_TTL`)
 - `internal/telemetry/` — TPS real medido por modelo (`~/.local/share/kterminal/telemetry.json`)
 
 ### Comandos do projeto

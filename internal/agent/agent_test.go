@@ -3799,11 +3799,20 @@ func TestSubagentRoutesIndependently(t *testing.T) {
 	if calls[1].Messages[1].Role != "user" || calls[1].Messages[1].Content != "count all models in the catalog\n\nbe quick" {
 		t.Fatalf("subagent user message = %+v, want description + guidance", calls[1].Messages[1])
 	}
-	if len(states) != 3 {
-		t.Fatalf("jev decisions = %d, want 3 (one per LLM call)", len(states))
+	if len(states) != 2 {
+		t.Fatalf("jev decisions = %d, want 2 (parent step 0 and the subagent; parent step 1 reuses the turn cache)", len(states))
 	}
 	if !strings.Contains(states[1], "count all models in the catalog") {
 		t.Fatalf("subagent jev state = %q, want it to mention the subtask description", states[1])
+	}
+	cachedRoute := false
+	for _, e := range events {
+		if e.Kind == EventRoute && e.Depth == 0 && e.Reason == "turn cache" {
+			cachedRoute = true
+		}
+	}
+	if !cachedRoute {
+		t.Fatal("no depth-0 route event with reason \"turn cache\" for the parent's second step")
 	}
 	var taskResult *Event
 	for i, e := range events {
@@ -4425,8 +4434,11 @@ func TestSystemPromptSkillWithEmbeddedRulesFallback(t *testing.T) {
 	if !strings.Contains(ag.systemPrompt, "Exibe a versão atual do kspec") {
 		t.Fatal("system prompt missing the resolved skill content")
 	}
-	if !strings.Contains(ag.systemPrompt, "Vitest") {
-		t.Fatal("embedded rules missing from the prompt with an active skill in a non-bootstrapped project")
+	if !strings.Contains(ag.systemPrompt, "Graphify") {
+		t.Fatal("system prompt missing the generic embedded rules with an active skill in a non-bootstrapped project")
+	}
+	if strings.Contains(ag.systemPrompt, "Vitest") {
+		t.Fatal("path-scoped embedded rules leaked into a project with no matching files")
 	}
 }
 
@@ -4962,8 +4974,11 @@ func TestSDDFlowSkillPromptAskUserAndArtifact(t *testing.T) {
 	if !strings.Contains(sys, "especialista em criar PRDs") {
 		t.Fatal("system prompt missing the active kspec-prd skill content")
 	}
-	if !strings.Contains(sys, "# Rules") || !strings.Contains(sys, "Vitest") {
-		t.Fatal("system prompt missing the embedded rules fallback alongside the active skill")
+	if !strings.Contains(sys, "# Rules") || !strings.Contains(sys, "Graphify") {
+		t.Fatal("system prompt missing the generic embedded rules fallback alongside the active skill")
+	}
+	if strings.Contains(sys, "Vitest") {
+		t.Fatal("path-scoped embedded rules leaked into a project with no matching files")
 	}
 	for i, m := range first[1:] {
 		if m.Role == "system" {

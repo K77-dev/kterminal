@@ -19,9 +19,11 @@ type LLM struct {
 	IdleTimeout              string        `toml:"idle_timeout"`
 	FirstByteTimeout         string        `toml:"first_byte_timeout"`
 	MaxRetries               int           `toml:"max_retries"`
+	ModelsCacheTTL           string        `toml:"models_cache_ttl"`
 	RequestTimeoutDuration   time.Duration `toml:"-"`
 	IdleTimeoutDuration      time.Duration `toml:"-"`
 	FirstByteTimeoutDuration time.Duration `toml:"-"`
+	ModelsCacheTTLDuration   time.Duration `toml:"-"`
 }
 
 type Agent struct {
@@ -92,6 +94,7 @@ const (
 	defaultFirstByteTimeout = "120s"
 	defaultMaxRetries       = 2
 	defaultSubagentTimeout  = "10m"
+	defaultModelsCacheTTL   = "15m"
 )
 
 func validMode(mode string) bool {
@@ -159,6 +162,9 @@ func Load() (*Config, error) {
 		}
 		cfg.LLM.MaxRetries = n
 	}
+	if v := os.Getenv("KTERMINAL_LLM_MODELS_CACHE_TTL"); v != "" {
+		cfg.LLM.ModelsCacheTTL = v
+	}
 	if v := os.Getenv("KTERMINAL_AGENT_SUBAGENT_TIMEOUT"); v != "" {
 		cfg.Agent.SubagentTimeout = v
 	}
@@ -209,6 +215,9 @@ func Load() (*Config, error) {
 	if cfg.LLM.MaxRetries < 0 {
 		return nil, fmt.Errorf("invalid llm.max_retries %d: must be >= 0", cfg.LLM.MaxRetries)
 	}
+	if cfg.LLM.ModelsCacheTTL == "" {
+		cfg.LLM.ModelsCacheTTL = defaultModelsCacheTTL
+	}
 	if cfg.Agent.SubagentTimeout == "" {
 		cfg.Agent.SubagentTimeout = defaultSubagentTimeout
 	}
@@ -221,6 +230,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.LLM.FirstByteTimeoutDuration, err = parseDurationField("llm.first_byte_timeout", cfg.LLM.FirstByteTimeout); err != nil {
 		return nil, err
+	}
+	if cfg.LLM.ModelsCacheTTLDuration, err = parseDurationField("llm.models_cache_ttl", cfg.LLM.ModelsCacheTTL); err != nil {
+		return nil, err
+	}
+	if cfg.LLM.ModelsCacheTTLDuration < 0 {
+		return nil, fmt.Errorf("invalid llm.models_cache_ttl %s: must be >= 0", cfg.LLM.ModelsCacheTTL)
 	}
 	if cfg.Agent.SubagentTimeoutDuration, err = parseDurationField("agent.subagent_timeout", cfg.Agent.SubagentTimeout); err != nil {
 		return nil, err

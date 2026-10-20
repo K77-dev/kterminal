@@ -208,6 +208,15 @@ func TestTelemetryPathRespectsXDGDataHome(t *testing.T) {
 	}
 }
 
+func TestModelsCachePathRespectsXDGDataHome(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "data")
+	t.Setenv("XDG_DATA_HOME", base)
+	want := filepath.Join(base, "kterminal", "models-cache.json")
+	if got := modelsCachePath(); got != want {
+		t.Fatalf("modelsCachePath() = %s, want %s", got, want)
+	}
+}
+
 func TestDoctorPrintsTelemetryTable(t *testing.T) {
 	cat, err := catalog.Load()
 	if err != nil {

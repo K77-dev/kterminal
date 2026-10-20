@@ -121,6 +121,10 @@ func main() {
 	ag.SetPinned(cfg.Model)
 	ag.Telemetry = store
 	ag.AttachKspec(kspecStore)
+	if cwd, err := os.Getwd(); err == nil {
+		ag.AttachProject(cwd)
+	}
+	ag.SetModelsCache(modelsCachePath(), cfg.LLM.ModelsCacheTTLDuration)
 	ag.AttachSquad(squadStore)
 	ag.SetSquadPins(cfg.Squad.Pins)
 	ag.SetSquadLimits(squad.Limits{MaxConvocations: cfg.Squad.MaxConvocations, TokenBudget: cfg.Squad.TokenBudget})
@@ -212,14 +216,22 @@ func resolveSession(continueFlag bool, sessionPath string) (*session.Writer, ses
 }
 
 func telemetryPath() string {
+	return dataPath("telemetry.json")
+}
+
+func modelsCachePath() string {
+	return dataPath("models-cache.json")
+}
+
+func dataPath(name string) string {
 	if base := os.Getenv("XDG_DATA_HOME"); base != "" {
-		return filepath.Join(base, "kterminal", "telemetry.json")
+		return filepath.Join(base, "kterminal", name)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".kterminal", "telemetry.json")
+		return filepath.Join(".kterminal", name)
 	}
-	return filepath.Join(home, ".local", "share", "kterminal", "telemetry.json")
+	return filepath.Join(home, ".local", "share", "kterminal", name)
 }
 
 func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store, kspecStore *kspec.Store, jevBaseURL string) int {

@@ -7,8 +7,11 @@ import (
 
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/project"
 	"kterminal/internal/session"
 )
+
+const maxRulesBytes = 12 * 1024
 
 const baseSystemPrompt = `You are kterminal, a terminal-based coding agent.
 
@@ -27,6 +30,7 @@ Tools:
 
 Conventions:
 - Make minimal, focused changes and follow the conventions of the codebase you are editing.
+- For simple operational requests (run, build, test), use the project context and act directly in the fewest steps; skip build, lint and test verification for requests that do not modify anything.
 - Verify your work with the project's build, lint and test commands when available.
 - Never run destructive git commands (push, reset --hard, clean, branch -D) without explicit user permission.
 - Do not commit unless the user explicitly asks.`
@@ -131,6 +135,9 @@ func (a *Agent) buildSystemPrompt() string {
 		return ""
 	}
 	sections := []string{baseSystemPrompt}
+	if a.projectCtx != "" {
+		sections = append(sections, a.projectContextSection())
+	}
 	if rules := a.activeRules(); len(rules) > 0 {
 		sections = append(sections, rulesSection(rules))
 	}
@@ -145,24 +152,58 @@ func (a *Agent) buildSystemPrompt() string {
 	return strings.Join(sections, "\n\n")
 }
 
+func (a *Agent) projectContextSection() string {
+	return "# Project context (" + a.projectCtxName + ")\n\n" + a.projectCtx
+}
+
+func (a *Agent) subagentSystemPromptWithProject() string {
+	if a.projectCtx == "" {
+		return subagentSystemPrompt
+	}
+	return subagentSystemPrompt + "\n\n" + a.projectContextSection()
+}
+
 func (a *Agent) activeRules() []kspec.Rule {
 	if a.kspecStore == nil {
 		return nil
 	}
+	var rules []kspec.Rule
 	if a.kspecStore.HasProjectRules() {
-		return a.kspecStore.Rules()
+		rules = a.kspecStore.Rules()
+	} else if a.activeSkill != "" && a.kspecStore.Source() == kspec.SourceEmbedded {
+		rules = a.kspecStore.Rules()
 	}
-	if a.activeSkill != "" && a.kspecStore.Source() == kspec.SourceEmbedded {
-		return a.kspecStore.Rules()
+	return filterRulesForProject(rules, a.projectFiles)
+}
+
+func filterRulesForProject(rules []kspec.Rule, files []string) []kspec.Rule {
+	if len(rules) == 0 {
+		return nil
 	}
-	return nil
+	out := make([]kspec.Rule, 0, len(rules))
+	for _, r := range rules {
+		if len(r.Paths) == 0 || project.MatchesAny(r.Paths, files) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func rulesSection(rules []kspec.Rule) string {
 	parts := make([]string, 0, len(rules)+1)
 	parts = append(parts, "# Rules\n\nFollow the rules below in all your work.")
+	budget := maxRulesBytes
+	var omitted []string
 	for _, r := range rules {
+		if budget < len(r.Content) {
+			omitted = append(omitted, r.Name)
+			continue
+		}
+		budget -= len(r.Content)
 		parts = append(parts, r.Content)
+	}
+	if len(omitted) > 0 {
+		parts = append(parts, fmt.Sprintf("(rules omitted for size: %s)", strings.Join(omitted, ", ")))
 	}
 	return strings.Join(parts, "\n\n")
 }

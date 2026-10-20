@@ -298,6 +298,9 @@ func TestLoadResilienceDefaults(t *testing.T) {
 	if cfg.Agent.SubagentTimeoutDuration != 10*time.Minute {
 		t.Errorf("SubagentTimeoutDuration = %v, want 10m", cfg.Agent.SubagentTimeoutDuration)
 	}
+	if cfg.LLM.ModelsCacheTTLDuration != 15*time.Minute {
+		t.Errorf("ModelsCacheTTLDuration = %v, want 15m", cfg.LLM.ModelsCacheTTLDuration)
+	}
 }
 
 func TestLoadResilienceDurationsParsed(t *testing.T) {
@@ -335,6 +338,72 @@ subagent_timeout = "90s"
 	}
 	if cfg.Agent.SubagentTimeoutDuration != 90*time.Second {
 		t.Errorf("SubagentTimeoutDuration = %v, want 90s", cfg.Agent.SubagentTimeoutDuration)
+	}
+}
+
+func TestLoadModelsCacheTTL(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+models_cache_ttl = "1h"
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.ModelsCacheTTL != "1h" {
+		t.Errorf("ModelsCacheTTL = %q, want 1h", cfg.LLM.ModelsCacheTTL)
+	}
+	if cfg.LLM.ModelsCacheTTLDuration != time.Hour {
+		t.Errorf("ModelsCacheTTLDuration = %v, want 1h", cfg.LLM.ModelsCacheTTLDuration)
+	}
+}
+
+func TestLoadModelsCacheTTLZeroDisables(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+models_cache_ttl = "0s"
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.ModelsCacheTTLDuration != 0 {
+		t.Errorf("ModelsCacheTTLDuration = %v, want 0", cfg.LLM.ModelsCacheTTLDuration)
+	}
+}
+
+func TestLoadModelsCacheTTLEnvOverridesFile(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+models_cache_ttl = "1h"
+`)
+	t.Setenv("KTERMINAL_LLM_MODELS_CACHE_TTL", "2m")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.ModelsCacheTTLDuration != 2*time.Minute {
+		t.Errorf("ModelsCacheTTLDuration = %v, want 2m", cfg.LLM.ModelsCacheTTLDuration)
+	}
+}
+
+func TestLoadModelsCacheTTLInvalidRejected(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+models_cache_ttl = "5min"
+`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid models_cache_ttl")
+	}
+}
+
+func TestLoadModelsCacheTTLNegativeRejected(t *testing.T) {
+	writeTestConfig(t, `
+[llm]
+models_cache_ttl = "-5m"
+`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for negative models_cache_ttl")
 	}
 }
 

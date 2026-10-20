@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"kterminal/internal/catalog"
 	"kterminal/internal/kspec"
 	"kterminal/internal/llm"
+	"kterminal/internal/project"
 	"kterminal/internal/router"
 	"kterminal/internal/rtk"
 	"kterminal/internal/session"
@@ -114,6 +116,13 @@ type Agent struct {
 	systemPrompt      string
 	mode              string
 	permission        string
+	projectDir        string
+	projectCtxName    string
+	projectCtx        string
+	projectFiles      []string
+	turnDecision      *router.Decision
+	modelsCachePath   string
+	modelsCacheTTL    time.Duration
 	lastPromptTokens  int64
 	lastEstimateChars int
 	candidates        []catalog.Model
@@ -173,6 +182,37 @@ func (a *Agent) SetRouters(r router.Router, fallback router.Router) {
 func (a *Agent) SetSubagentTimeout(d time.Duration) { a.subagentTimeout = d }
 
 func (a *Agent) SetRtkDetector(det *rtk.Detector) { a.rtkDetector = det }
+
+// AttachProject binds the project directory for context and rules filtering.
+func (a *Agent) AttachProject(dir string) {
+	a.projectDir = dir
+	a.refreshProject()
+}
+
+// SetModelsCache enables the gateway model list cache (TTL <= 0 disables it).
+func (a *Agent) SetModelsCache(path string, ttl time.Duration) {
+	a.modelsCachePath = path
+	a.modelsCacheTTL = ttl
+}
+
+// refreshProject reloads the project context and file list, rebuilding the
+// system prompt only when they changed.
+func (a *Agent) refreshProject() {
+	if a.projectDir == "" {
+		return
+	}
+	name, content, ok := project.Context(a.projectDir)
+	ctxName, ctx := "", ""
+	if ok {
+		ctxName, ctx = name, content
+	}
+	files := project.Files(a.projectDir)
+	if ctxName == a.projectCtxName && ctx == a.projectCtx && slices.Equal(files, a.projectFiles) {
+		return
+	}
+	a.projectCtxName, a.projectCtx, a.projectFiles = ctxName, ctx, files
+	a.rebuildSystemPrompt()
+}
 
 func (a *Agent) Reset() {
 	a.messages = nil
@@ -673,7 +713,7 @@ func (a *Agent) newSubagent(description, guidance string) *Agent {
 		sub.Tools.SetRtkDetector(a.rtkDetector)
 	}
 	sub.messages = []llm.Message{
-		{Role: "system", Content: subagentSystemPrompt},
+		{Role: "system", Content: a.subagentSystemPromptWithProject()},
 		{Role: "user", Content: content},
 	}
 	sub.turnMessage = llm.Message{Role: "user", Content: content}
@@ -817,6 +857,7 @@ func (a *Agent) loop(ctx context.Context, userMessage llm.Message, meta []sessio
 	go func() {
 		defer a.endTurn()
 		var partial strings.Builder
+		a.refreshProject()
 		if err := a.ensureCandidates(ctx); err != nil {
 			if isAbort(ctx, err) {
 				a.abortTurn("", &partial, nil)
@@ -916,6 +957,9 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 			})
 			if err == nil {
 				decision.Model = name
+				if a.turnDecision != nil {
+					a.turnDecision.Model = name
+				}
 				break
 			}
 			lastErr = err
@@ -1218,15 +1262,32 @@ func (a *Agent) ensureCandidates(ctx context.Context) error {
 	if a.candidates != nil {
 		return nil
 	}
+	if a.modelsCacheTTL > 0 {
+		if names, ts, ok := llm.LoadModelsCache(a.modelsCachePath); ok && time.Since(ts) < a.modelsCacheTTL {
+			if candidates := a.Catalog.Available(names); len(candidates) > 0 {
+				a.candidates = candidates
+				return nil
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	remote, err := a.LLM.ListModels(ctx)
 	if err != nil {
+		if names, _, ok := llm.LoadModelsCache(a.modelsCachePath); ok {
+			if candidates := a.Catalog.Available(names); len(candidates) > 0 {
+				a.candidates = candidates
+				return nil
+			}
+		}
 		return fmt.Errorf("listing gateway models: %w (check /config: base URL and API key)", err)
 	}
 	a.candidates = a.Catalog.Available(remote)
 	if len(a.candidates) == 0 {
 		return fmt.Errorf("gateway %s exposes %d models but none are in the kterminal catalog", a.LLM.BaseURL, len(remote))
+	}
+	if a.modelsCacheTTL > 0 {
+		_ = llm.SaveModelsCache(a.modelsCachePath, remote)
 	}
 	return nil
 }
@@ -1238,6 +1299,21 @@ func (a *Agent) decide(ctx context.Context, userMessage llm.Message, step int) (
 			return router.Decision{Model: a.pinned, Confidence: 1, Router: "pin"}, nil
 		}
 	}
+	if step > 0 && a.turnDecision != nil {
+		d := *a.turnDecision
+		if m, ok := a.Catalog.Get(d.Model); ok && !a.modelHealth.isBlocked(d.Model) && (!hasImages || m.Vision) {
+			d.Reason = "turn cache"
+			return d, nil
+		}
+	}
+	decision, err := a.routeFresh(ctx, userMessage, step, hasImages)
+	if err == nil {
+		a.turnDecision = &decision
+	}
+	return decision, err
+}
+
+func (a *Agent) routeFresh(ctx context.Context, userMessage llm.Message, step int, hasImages bool) (router.Decision, error) {
 	state := a.buildState(userMessage.Content, step, hasImages)
 	candidates := make([]catalog.Model, len(a.candidates))
 	for i, m := range a.candidates {

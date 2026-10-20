@@ -16,6 +16,7 @@ type frontmatter struct {
 
 type ruleFrontmatter struct {
 	Disciplines []string `yaml:"disciplines"`
+	Paths       []string `yaml:"paths"`
 }
 
 func parseRuleFrontmatter(data []byte) (ruleFrontmatter, error) {

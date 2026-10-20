@@ -629,6 +629,32 @@ func TestRulesProjectWins(t *testing.T) {
 	}
 }
 
+func TestRulePathsFromFrontmatter(t *testing.T) {
+	dir := writeProject(t, map[string]string{
+		filepath.Join(".agents", "rules", "with-paths.md"): "---\npaths:\n  - \"**/*.ts\"\n  - \"**/*.tsx\"\n---\n\nbody\n",
+		filepath.Join(".agents", "rules", "generic.md"):    "no frontmatter\n",
+	})
+	byName := map[string]Rule{}
+	for _, r := range storeAt(t, dir).Rules() {
+		byName[r.Name] = r
+	}
+	if got := byName["with-paths"].Paths; len(got) != 2 || got[0] != "**/*.ts" || got[1] != "**/*.tsx" {
+		t.Fatalf("Paths = %v, want [**/*.ts **/*.tsx]", got)
+	}
+	if got := byName["generic"].Paths; len(got) != 0 {
+		t.Fatalf("Paths = %v, want empty without frontmatter", got)
+	}
+	for _, r := range embeddedStore(t).Rules() {
+		if r.Name == "typescript" {
+			if len(r.Paths) == 0 {
+				t.Fatal("embedded typescript rule has no Paths")
+			}
+			return
+		}
+	}
+	t.Fatal("embedded typescript rule missing")
+}
+
 func TestHasProjectRules(t *testing.T) {
 	if embeddedStore(t).HasProjectRules() {
 		t.Fatal("HasProjectRules() = true, want false without a project dir")
