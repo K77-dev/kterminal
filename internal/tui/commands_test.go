@@ -738,7 +738,7 @@ func TestTabWithTextDoesNotToggle(t *testing.T) {
 	}
 }
 
-func TestTabToggleInertInSquad(t *testing.T) {
+func TestTabTogglesPermissionInSquadMode(t *testing.T) {
 	gw, _ := captureGateway(t)
 	m, ag := newKspecAgentModel(t, gw.URL)
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -747,12 +747,23 @@ func TestTabToggleInertInSquad(t *testing.T) {
 	}
 
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if got := ag.Permission(); got != agent.PermissionBuild {
-		t.Fatalf("tab in squad mode = %q, want build (inert)", got)
+	if got := ag.Permission(); got != agent.PermissionPlan {
+		t.Fatalf("tab in squad mode = %q, want plan", got)
+	}
+	if hint := stripANSI(m.hintBar()); !strings.Contains(hint, "plan") {
+		t.Fatalf("hint bar missing the plan segment in squad mode:\n%s", hint)
 	}
 	plain := stripANSI(m.View())
-	if !strings.Contains(plain, "/mode") {
-		t.Fatalf("view missing the squad hint after tab:\n%s", plain)
+	if !strings.Contains(plain, "plan mode — research and plan only") {
+		t.Fatalf("view missing the plan announcement in squad mode:\n%s", plain)
+	}
+
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if got := ag.Permission(); got != agent.PermissionBuild {
+		t.Fatalf("tab back in squad mode = %q, want build", got)
+	}
+	if got := ag.Mode(); got != "squad" {
+		t.Fatalf("toggle must not change the mode, got %q", got)
 	}
 }
 

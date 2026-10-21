@@ -690,8 +690,24 @@ func TestPlanBlocksToolGating(t *testing.T) {
 			blocked: false,
 		},
 		{
-			name:    "plan stays inert while the mesa is active",
+			name:       "plan blocks bash while the mesa is active",
+			setup:      func(ag *Agent) { ag.permission = PermissionPlan; ag.mode = ModeSquad },
+			tool:       "bash",
+			blocked:    true,
+			wantReason: "plan mode",
+		},
+		{
+			name:    "plan keeps task for convocations while the mesa is active",
 			setup:   func(ag *Agent) { ag.permission = PermissionPlan; ag.mode = ModeSquad },
+			tool:    taskToolName,
+			blocked: false,
+		},
+		{
+			name: "plan keeps task for convocations with a kickoff in sdd mode",
+			setup: func(ag *Agent) {
+				ag.permission = PermissionPlan
+				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
+			},
 			tool:    taskToolName,
 			blocked: false,
 		},
@@ -733,6 +749,32 @@ func TestPlanToolDefinitionsFiltered(t *testing.T) {
 	}
 }
 
+func TestSquadPlanToolDefinitionsFiltered(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
+	ag.AttachSquadKickoffTool()
+	ag.AttachAskUserTool()
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	ag.permission = PermissionPlan
+	names := map[string]bool{}
+	for _, d := range ag.toolDefinitions() {
+		names[d.Function.Name] = true
+	}
+	for _, want := range []string{"read", "glob", "grep", taskToolName, "squad_kickoff", "ask_user"} {
+		if !names[want] {
+			t.Fatalf("squad plan tool definitions missing %q: %v", want, names)
+		}
+	}
+	for _, banned := range []string{"write", "edit", "bash", "kspec_bootstrap"} {
+		if names[banned] {
+			t.Fatalf("squad plan tool definitions must not expose %q: %v", banned, names)
+		}
+	}
+}
+
 func TestTogglePermission(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachKspec(kspec.Load())
@@ -765,21 +807,32 @@ func TestTogglePermission(t *testing.T) {
 	}
 }
 
-func TestTogglePermissionInertInSquad(t *testing.T) {
+func TestTogglePermissionInSquadMode(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
-	ag.mode = ModeSquad
+	ag.AttachSquad(squad.Load())
+	if err := ag.ActivateMode("squad"); err != nil {
+		t.Fatalf("activate squad: %v", err)
+	}
+	maestro := ag.systemPrompt
 	next, err := ag.TogglePermission()
-	if err == nil {
-		t.Fatal("toggle in squad mode must fail")
+	if err != nil || next != PermissionPlan {
+		t.Fatalf("toggle in squad mode = (%q, %v), want (plan, nil)", next, err)
 	}
-	if !strings.Contains(err.Error(), "/mode") {
-		t.Fatalf("toggle error = %q, want it to point at /mode", err)
+	if got := ag.Permission(); got != PermissionPlan {
+		t.Fatalf("permission in squad mode = %q, want plan", got)
 	}
-	if next != "" {
-		t.Fatalf("toggle in squad = %q, want empty", next)
+	if !strings.Contains(ag.systemPrompt, maestro) {
+		t.Fatalf("plan toggle must preserve the maestro prompt: %q", ag.systemPrompt)
 	}
-	if got := ag.Permission(); got != PermissionBuild {
-		t.Fatalf("permission changed in squad mode: %q", got)
+	if !strings.Contains(ag.systemPrompt, "Plan mode active") {
+		t.Fatalf("system prompt missing the plan addendum in squad mode: %q", ag.systemPrompt)
+	}
+	next, err = ag.TogglePermission()
+	if err != nil || next != PermissionBuild {
+		t.Fatalf("toggle back in squad mode = (%q, %v), want (build, nil)", next, err)
+	}
+	if strings.Contains(ag.systemPrompt, "Plan mode active") {
+		t.Fatalf("plan addendum must leave the maestro prompt after toggling back: %q", ag.systemPrompt)
 	}
 }
 
@@ -793,64 +846,6 @@ func TestTogglePermissionBlockedMidTurn(t *testing.T) {
 	}
 	if err := ag.SetPermission(PermissionPlan); err == nil {
 		t.Fatal("SetPermission mid-turn must fail")
-	}
-}
-
-func TestSquadBlocksToolGating(t *testing.T) {
-	cases := []struct {
-		name    string
-		setup   func(*Agent)
-		tool    string
-		blocked bool
-	}{
-		{
-			name:    "squad mode blocks mutating tools",
-			setup:   func(ag *Agent) { ag.mode = "squad" },
-			tool:    "bash",
-			blocked: true,
-		},
-		{
-			name: "kickoff in sdd mode blocks mutating tools",
-			setup: func(ag *Agent) {
-				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
-			},
-			tool:    "bash",
-			blocked: true,
-		},
-		{
-			name: "kickoff in sdd mode does not block subagents",
-			setup: func(ag *Agent) {
-				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
-				ag.depth = 1
-			},
-			tool:    "bash",
-			blocked: false,
-		},
-		{
-			name: "kickoff in sdd mode keeps the task tool",
-			setup: func(ag *Agent) {
-				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
-			},
-			tool:    "task",
-			blocked: false,
-		},
-		{
-			name: "kickoff in sdd mode keeps read tools",
-			setup: func(ag *Agent) {
-				ag.RegisterKickoff(squad.Kickoff{Roles: []string{"architect"}})
-			},
-			tool:    "read",
-			blocked: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
-			tc.setup(ag)
-			if got := ag.squadBlocksTool(tc.tool); got != tc.blocked {
-				t.Fatalf("squadBlocksTool(%q) = %v, want %v", tc.tool, got, tc.blocked)
-			}
-		})
 	}
 }
 
@@ -910,7 +905,7 @@ func TestFormatKickoffTextAdvisory(t *testing.T) {
 	if !strings.HasPrefix(text, "mesa registered: roles=") {
 		t.Fatalf("kickoff text = %q, want the mesa registered prefix", text)
 	}
-	want := "maestro restrictions and " + strconv.Itoa(skillMaxSteps) + "-step limit now apply"
+	want := strconv.Itoa(skillMaxSteps) + "-step maestro limit now applies"
 	if !strings.Contains(text, want) {
 		t.Fatalf("kickoff text = %q, want the advisory suffix %q", text, want)
 	}
@@ -5117,7 +5112,7 @@ func TestRestoreSkillPreservesSquadPrompt(t *testing.T) {
 	}
 }
 
-func TestMaestroPromptForbidsDirectExecution(t *testing.T) {
+func TestMaestroPromptOrchestrationRules(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachSquad(squad.Load())
 
@@ -5125,9 +5120,10 @@ func TestMaestroPromptForbidsDirectExecution(t *testing.T) {
 		t.Fatalf("activate squad: %v", err)
 	}
 	for _, phrase := range []string{
-		"never do the engineering work yourself",
 		"problem statement for the mesa",
 		"convene the right persona instead",
+		"you carry the full toolset",
+		"In plan mode every mutating tool and every execution handoff is blocked",
 	} {
 		if !strings.Contains(ag.systemPrompt, phrase) {
 			t.Fatalf("maestro prompt missing hard-rule phrase %q", phrase)
@@ -5135,7 +5131,7 @@ func TestMaestroPromptForbidsDirectExecution(t *testing.T) {
 	}
 }
 
-func TestSquadMaestroToolsetExcludesExecutionTools(t *testing.T) {
+func TestSquadMaestroToolsetFollowsPermission(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachSquad(squad.Load())
 	ag.AttachTaskTool()
@@ -5149,40 +5145,59 @@ func TestSquadMaestroToolsetExcludesExecutionTools(t *testing.T) {
 	for _, d := range ag.toolDefinitions() {
 		got[d.Function.Name] = true
 	}
+	for _, want := range []string{"read", "glob", "grep", "task", "squad_kickoff", "ask_user", "write", "edit", "bash", "kspec_bootstrap"} {
+		if !got[want] {
+			t.Fatalf("squad build toolset missing %q: %v", want, got)
+		}
+	}
+
+	ag.permission = PermissionPlan
+	got = map[string]bool{}
+	for _, d := range ag.toolDefinitions() {
+		got[d.Function.Name] = true
+	}
 	for _, blocked := range []string{"write", "edit", "bash", "kspec_bootstrap"} {
 		if got[blocked] {
-			t.Fatalf("maestro toolset must not expose %q: %v", blocked, got)
+			t.Fatalf("squad plan toolset must not expose %q: %v", blocked, got)
 		}
 	}
 	for _, keep := range []string{"read", "glob", "grep", "task", "squad_kickoff", "ask_user"} {
 		if !got[keep] {
-			t.Fatalf("maestro toolset missing %q: %v", keep, got)
+			t.Fatalf("squad plan toolset missing %q: %v", keep, got)
 		}
 	}
 }
 
-func TestSquadMaestroBlockedFromExecutionTools(t *testing.T) {
+func TestSquadMaestroExecutionFollowsPermission(t *testing.T) {
 	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	ag.AttachSquad(squad.Load())
+	ag.AttachTaskTool()
 	if err := ag.ActivateMode("squad"); err != nil {
 		t.Fatalf("activate squad: %v", err)
 	}
 
-	for _, name := range []string{"bash", "write", "edit", "kspec_bootstrap"} {
-		if !ag.squadBlocksTool(name) {
-			t.Fatalf("squadBlocksTool(%q) = false, want true", name)
-		}
+	res, err := ag.executeTool(context.Background(), "bash", `{"command":"echo ok"}`)
+	if err != nil {
+		t.Fatalf("executeTool bash in squad build mode: %v", err)
 	}
-	if ag.squadBlocksTool(taskToolName) {
-		t.Fatal("squadBlocksTool(task) = true, want false")
-	}
-	if ag.squadBlocksTool("read") {
-		t.Fatal("squadBlocksTool(read) = true, want false")
+	if !strings.Contains(res.Output, "ok") {
+		t.Fatalf("bash output in squad build mode = %q, want ok", res.Output)
 	}
 
-	_, err := ag.executeTool(context.Background(), "bash", `{"command":"echo hi"}`)
-	if err == nil || !strings.Contains(err.Error(), "squad mode") {
-		t.Fatalf("executeTool bash in squad mode: err = %v, want squad mode guard error", err)
+	ag.permission = PermissionPlan
+	_, err = ag.executeTool(context.Background(), "bash", `{"command":"echo nope"}`)
+	if err == nil || !strings.Contains(err.Error(), "plan mode") {
+		t.Fatalf("executeTool bash in squad plan mode: err = %v, want plan mode guard error", err)
+	}
+
+	_, err = ag.executeTool(context.Background(), taskToolName, `{"description":"implement it"}`)
+	if err == nil || !strings.Contains(err.Error(), "plan mode") {
+		t.Fatalf("execution handoff in squad plan mode: err = %v, want plan mode guard error", err)
+	}
+
+	_, err = ag.executeTool(context.Background(), taskToolName, `{"description":"deliberate","persona":"architect"}`)
+	if err == nil || !strings.Contains(err.Error(), "no squad kickoff registered") {
+		t.Fatalf("persona convocation in squad plan mode: err = %v, want the kickoff guard (plan must not block convocations)", err)
 	}
 }
 
@@ -5191,11 +5206,6 @@ func TestExecutionToolsAvailableOutsideSquadMaestro(t *testing.T) {
 	ag.AttachSquad(squad.Load())
 	ag.AttachTaskTool()
 
-	for _, name := range []string{"bash", "write", "edit"} {
-		if ag.squadBlocksTool(name) {
-			t.Fatalf("squadBlocksTool(%q) in sdd mode = true, want false", name)
-		}
-	}
 	got := map[string]bool{}
 	for _, d := range ag.toolDefinitions() {
 		got[d.Function.Name] = true
@@ -5217,8 +5227,8 @@ func TestExecutionToolsAvailableOutsideSquadMaestro(t *testing.T) {
 	sub := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
 	sub.depth = 1
 	sub.mode = "squad"
-	if sub.squadBlocksTool("bash") {
-		t.Fatal("squadBlocksTool(bash) at depth 1 = true, want false (subagents execute)")
+	if sub.planBlocksTool("bash") {
+		t.Fatal("planBlocksTool(bash) at depth 1 = true, want false (subagents execute)")
 	}
 }
 

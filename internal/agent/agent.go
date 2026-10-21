@@ -309,14 +309,11 @@ func (a *Agent) Permission() string {
 	return a.permission
 }
 
-// TogglePermission switches between plan and build. It is a no-op (with a
-// user-facing hint) while the squad mesa is active.
+// TogglePermission switches between plan and build in every mode (sdd and
+// squad).
 func (a *Agent) TogglePermission() (string, error) {
 	if a.turnRunning() {
 		return "", errTurnActive
-	}
-	if a.Mode() == ModeSquad {
-		return "", errors.New("squad mode is active — switch modes with /mode")
 	}
 	next := PermissionBuild
 	if a.Permission() == PermissionBuild {
@@ -747,6 +744,9 @@ func (a *Agent) AttachTaskTool() {
 			description, _ := args["description"].(string)
 			guidance, _ := args["guidance"].(string)
 			persona, _ := args["persona"].(string)
+			if persona == "" && a.planRestricted() {
+				return tools.Result{}, errors.New("plan mode: execution handoff is blocked — convene personas to deliberate or switch to build mode to execute")
+			}
 			if persona != "" {
 				text, err := a.convokePersona(ctx, persona, description, guidance)
 				if err != nil {
@@ -840,7 +840,7 @@ func (a *Agent) AttachSquadKickoffTool() {
 }
 
 func formatKickoffText(k squad.Kickoff) string {
-	return fmt.Sprintf("mesa registered: roles=%v max_convocations=%d token_budget=%d exit_criterion=%q — maestro restrictions and %d-step limit now apply",
+	return fmt.Sprintf("mesa registered: roles=%v max_convocations=%d token_budget=%d exit_criterion=%q — %d-step maestro limit now applies",
 		k.Roles, k.MaxConvocations, k.TokenBudget, k.ExitCriterion, skillMaxSteps)
 }
 
@@ -1003,7 +1003,7 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				a.Session.Write(session.Event{Type: "tool_call", Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, Cost: cost, Depth: a.depth, Agent: a.agentName})
 				a.emit(Event{Kind: EventToolStart, Model: decision.Model, Tool: tc.Function.Name, Args: tc.Function.Arguments, SessionCost: a.sessionCost, TurnTokens: a.turnTokens})
 				approved := true
-				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) && !a.squadBlocksTool(tc.Function.Name) {
+				if a.Confirm && a.Tools.IsMutating(tc.Function.Name) {
 					diff, _ := a.Tools.PendingDiff(ctx, tc.Function.Name, tc.Function.Arguments)
 					ch := make(chan bool, 1)
 					a.emit(Event{Kind: EventConfirm, Tool: tc.Function.Name, Args: tc.Function.Arguments, Diff: diff, ApproveCh: ch})
@@ -1149,35 +1149,28 @@ func (a *Agent) maestroActive() bool {
 	return active || a.mode == ModeSquad
 }
 
-func (a *Agent) maestroRestricted() bool {
-	return a.depth == 0 && a.maestroActive()
-}
-
-func (a *Agent) squadBlocksTool(name string) bool {
-	return a.maestroRestricted() && name != taskToolName && a.Tools.IsMutating(name)
-}
-
 // planRestricted reports whether this agent runs under the plan permission:
 // research and planning only, no side effects.
 func (a *Agent) planRestricted() bool {
 	return a.Permission() == PermissionPlan
 }
 
-// planBlocksTool blocks every mutating tool and subagent delegation while in
-// plan mode — the agent researches and plans, it never executes. The squad
-// mesa governs itself (it needs task to convoke personas), so the plan layer
-// stays inert while the maestro is active.
+// planBlocksTool blocks every mutating tool while in plan mode — the agent
+// researches and plans, it never executes. The task tool stays available
+// while the mesa is active so the maestro can still convene personas
+// (personas are read-only); execution handoffs are refused inside the task
+// tool itself.
 func (a *Agent) planBlocksTool(name string) bool {
-	if !a.planRestricted() || a.maestroActive() {
+	if !a.planRestricted() {
 		return false
 	}
-	return a.Tools.IsMutating(name) || name == taskToolName
+	if name == taskToolName {
+		return !a.maestroActive()
+	}
+	return a.Tools.IsMutating(name)
 }
 
 func (a *Agent) toolBlocked(name string) string {
-	if a.squadBlocksTool(name) {
-		return "squad mode: the maestro never executes work itself (tool " + strconv.Quote(name) + " blocked). Deliberate via task with persona after squad_kickoff; execute the converged plan via task without persona — subagents carry the full toolset"
-	}
 	if a.planBlocksTool(name) {
 		return "plan mode: " + strconv.Quote(name) + " is blocked — research with read/glob/grep and present a plan; switch to build mode to execute it"
 	}
@@ -1186,15 +1179,12 @@ func (a *Agent) toolBlocked(name string) string {
 
 func (a *Agent) toolDefinitions() []llm.Tool {
 	defs := a.Tools.Definitions()
-	blocked := func(name string) bool {
-		return a.squadBlocksTool(name) || a.planBlocksTool(name)
-	}
-	if !a.maestroRestricted() && !a.planRestricted() {
+	if !a.planRestricted() {
 		return defs
 	}
 	out := make([]llm.Tool, 0, len(defs))
 	for _, d := range defs {
-		if blocked(d.Function.Name) {
+		if a.planBlocksTool(d.Function.Name) {
 			continue
 		}
 		out = append(out, d)

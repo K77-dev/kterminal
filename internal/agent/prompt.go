@@ -109,21 +109,21 @@ func (a *Agent) applySkill(name, eventType string) {
 }
 
 func maestroAddendum() string {
-	return fmt.Sprintf("\n\nMesa active: you are the maestro. Delegate work through convocations instead of implementing directly. Mutating tools other than the task tool are restricted, and your step limit is now %d steps.", skillMaxSteps)
+	return fmt.Sprintf("\n\nMesa active: you are the maestro. Delegate work through convocations instead of implementing directly, and your step limit is now %d steps.", skillMaxSteps)
 }
 
 const planAddendum = `
 
-Plan mode active: research and plan only. Every mutating tool (write, edit, bash, kspec_bootstrap) and subagent delegation (task) is blocked. Explore the codebase with read/glob/grep, ask the user questions with ask_user when you need decisions, and present a complete implementation plan. The user will review the plan and switch to build mode to execute it.`
+Plan mode active: research and plan only. Mutating tools (write, edit, bash, kspec_bootstrap) are blocked, and so are execution handoffs via task without a persona — persona convocations stay available for deliberation. Explore the codebase with read/glob/grep, ask the user questions with ask_user when you need decisions, and present a complete implementation plan. The user will review the plan and switch to build mode to execute it.`
 
 func (a *Agent) rebuildSystemPrompt() {
 	if a.mode == ModeSquad && a.squadStore != nil {
 		a.systemPrompt = a.squadStore.MaestroPrompt()
-		return
-	}
-	a.systemPrompt = a.buildSystemPrompt()
-	if a.maestroActive() {
-		a.systemPrompt += maestroAddendum()
+	} else {
+		a.systemPrompt = a.buildSystemPrompt()
+		if a.maestroActive() {
+			a.systemPrompt += maestroAddendum()
+		}
 	}
 	if a.planRestricted() {
 		a.systemPrompt += planAddendum

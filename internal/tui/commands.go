@@ -27,7 +27,7 @@ var modeOptions = []string{"sdd", "squad"}
 const modeCommand = "/mode"
 
 // togglePermission switches between plan and build (opencode-style Tab /
-// Alt+Tab). In squad mode it is inert and shows a hint instead.
+// Alt+Tab) in every mode (sdd and squad).
 func (m Model) togglePermission() (tea.Model, tea.Cmd) {
 	next, err := m.agent.TogglePermission()
 	if err != nil {
