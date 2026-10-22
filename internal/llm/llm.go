@@ -384,6 +384,11 @@ func IsModelUnavailable(err error) bool {
 	return errors.As(err, &se) && se.code == http.StatusNotFound
 }
 
+func IsPayloadTooLarge(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusRequestEntityTooLarge
+}
+
 func isTransient(err error) bool {
 	if err == nil {
 		return false

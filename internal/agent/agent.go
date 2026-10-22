@@ -36,6 +36,10 @@ const preservedTailMessages = 4
 const summaryModel = "deepseek-v4.1-flash"
 const summaryTurnChars = 2000
 const toolResultTruncateChars = 2000
+
+const toolArgsTruncateChars = 2000
+
+const payloadShrinkLimit = 3
 const toolOutputThrottle = 50 * time.Millisecond
 
 var errMaxSteps = errors.New("reached max tool steps")
@@ -949,12 +953,17 @@ func (a *Agent) runLoop(ctx context.Context) (finalText string, err error) {
 				a.emit(Event{Kind: EventRoute, Model: name, Router: decision.Router, Reason: reason})
 				a.Session.Write(session.Event{Type: "route", Model: name, Router: decision.Router, Reason: reason, Depth: a.depth, Agent: a.agentName})
 			}
-			var deltas int
-			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.toolDefinitions(), func(s string) {
-				deltas++
+			onDelta := func(s string) {
 				partial.WriteString(s)
 				a.emit(Event{Kind: EventDelta, Model: name, Text: s})
-			})
+			}
+			result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.toolDefinitions(), onDelta)
+			for shrinks := 0; llm.IsPayloadTooLarge(err) && shrinks < payloadShrinkLimit && a.shrinkPayload(ctx); shrinks++ {
+				result, err = a.LLM.ChatStream(ctx, name, a.withSystemPrompt(), a.toolDefinitions(), onDelta)
+			}
+			if err != nil && llm.IsPayloadTooLarge(err) {
+				err = fmt.Errorf("request body exceeds the gateway size limit even after compacting and truncating the context — run /clear, shorten the current message, or raise the gateway's body limit: %w", err)
+			}
 			if err == nil {
 				decision.Model = name
 				if a.turnDecision != nil {
@@ -1399,6 +1408,12 @@ func (a *Agent) promptChars() int {
 	total := len(a.systemPrompt)
 	for _, m := range a.messages {
 		total += len(m.Role) + len(m.Content) + len(m.ToolCallID)
+		for _, p := range m.ContentParts {
+			total += len(p.Text)
+			if p.ImageURL != nil {
+				total += len(p.ImageURL.URL)
+			}
+		}
 		for _, tc := range m.ToolCalls {
 			total += len(tc.ID) + len(tc.Function.Name) + len(tc.Function.Arguments)
 		}
@@ -1446,6 +1461,9 @@ func (a *Agent) compact(ctx context.Context) error {
 	if cut == 0 {
 		return nil
 	}
+	if cut == 1 && a.messages[0].Role == "system" {
+		return nil
+	}
 	summaryInput := buildSummaryPrompt(a.messages[:cut])
 	model := summaryModel
 	if _, ok := a.Catalog.Get(model); !ok || !a.modelAvailable(model) {
@@ -1468,7 +1486,10 @@ func (a *Agent) compact(ctx context.Context) error {
 }
 
 func (a *Agent) truncateOldToolResults() bool {
-	limit := len(a.messages) - preservedTailMessages
+	return a.truncateToolResults(len(a.messages) - preservedTailMessages)
+}
+
+func (a *Agent) truncateToolResults(limit int) bool {
 	for i := 0; i < limit; i++ {
 		m := &a.messages[i]
 		if m.Role != "tool" || len(m.Content) <= toolResultTruncateChars {
@@ -1482,4 +1503,36 @@ func (a *Agent) truncateOldToolResults() bool {
 		return true
 	}
 	return false
+}
+
+func (a *Agent) truncateToolCallArguments(limit int) bool {
+	for i := 0; i < limit; i++ {
+		m := &a.messages[i]
+		if m.Role != "assistant" {
+			continue
+		}
+		for j := range m.ToolCalls {
+			args := m.ToolCalls[j].Function.Arguments
+			if len(args) <= toolArgsTruncateChars {
+				continue
+			}
+			truncated := args[:toolArgsTruncateChars] + "… (truncated)"
+			if truncated == args {
+				continue
+			}
+			m.ToolCalls[j].Function.Arguments = truncated
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) shrinkPayload(ctx context.Context) bool {
+	before := a.promptChars()
+	_ = a.compact(ctx)
+	for a.truncateToolResults(len(a.messages)) {
+	}
+	for a.truncateToolCallArguments(len(a.messages)) {
+	}
+	return a.promptChars() < before
 }

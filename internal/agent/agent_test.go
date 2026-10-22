@@ -2125,6 +2125,259 @@ func TestCompactionEmitsEventAndTranscript(t *testing.T) {
 	}
 }
 
+func payloadTooLargeGateway(t *testing.T, mainFailures int, summaryChunks, mainChunks []string, calls *[]chatCall) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/models", modelsHandler(t))
+	var mainCalls int
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model    string        `json:"model"`
+			Messages []llm.Message `json:"messages"`
+			Tools    []llm.Tool    `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode chat request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		*calls = append(*calls, chatCall{Model: body.Model, Messages: body.Messages, Tools: body.Tools})
+		chunks := mainChunks
+		if len(body.Tools) == 0 {
+			chunks = summaryChunks
+		} else {
+			mainCalls++
+			if mainCalls <= mainFailures {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				fmt.Fprint(w, "<html><head><title>413 Request Entity Too Large</title></head></html>")
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestPayloadTooLargeShrinksAndRetries(t *testing.T) {
+	var calls []chatCall
+	gw := payloadTooLargeGateway(t, 1,
+		contentChunks("dense summary of earlier work", 5, 2),
+		contentChunks("final answer", 30, 3),
+		&calls,
+	)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.messages = bigHistory()
+
+	ag.Run("final question")
+	events := collectEvents(t, ag)
+
+	if len(calls) != 3 {
+		t.Fatalf("gateway calls = %d, want 3 (rejected main, summary, retried main): %+v", len(calls), calls)
+	}
+	first, summary, second := calls[0], calls[1], calls[2]
+	if first.Model != "glm-5.3" || len(first.Tools) == 0 {
+		t.Fatalf("first call = model %q with %d tools, want main call on glm-5.3 with tools", first.Model, len(first.Tools))
+	}
+	if summary.Model != "deepseek-v4.1-flash" || len(summary.Tools) != 0 {
+		t.Fatalf("summary call = model %q with %d tools, want tool-less call on deepseek-v4.1-flash", summary.Model, len(summary.Tools))
+	}
+	if second.Model != "glm-5.3" {
+		t.Fatalf("retry model = %q, want glm-5.3 (same model — 413 is not a model failure)", second.Model)
+	}
+	if len(second.Messages) >= len(first.Messages) {
+		t.Fatalf("retry sent %d messages, want fewer than the %d of the rejected call", len(second.Messages), len(first.Messages))
+	}
+
+	var sawCompaction, sawDone bool
+	for _, e := range events {
+		switch e.Kind {
+		case EventCompaction:
+			sawCompaction = true
+		case EventTurnDone:
+			sawDone = true
+		case EventError:
+			t.Fatalf("unexpected error event: %s", e.Text)
+		}
+	}
+	if !sawCompaction {
+		t.Fatal("no compaction event")
+	}
+	if !sawDone {
+		t.Fatal("no turn_done event — session did not recover from 413")
+	}
+}
+
+func TestPayloadTooLargeWithoutShrinkRoomErrors(t *testing.T) {
+	var calls []chatCall
+	gw := payloadTooLargeGateway(t, 10, nil, nil, &calls)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+
+	ag.Run("hello")
+	events := collectEvents(t, ag)
+
+	if len(calls) != 1 {
+		t.Fatalf("gateway calls = %d, want 1 (nothing to shrink, no retry)", len(calls))
+	}
+	var errEvent *Event
+	for i, e := range events {
+		if e.Kind == EventError {
+			errEvent = &events[i]
+		}
+	}
+	if errEvent == nil {
+		t.Fatal("no error event")
+	}
+	if !strings.Contains(errEvent.Text, "413") || !strings.Contains(errEvent.Text, "run /clear") {
+		t.Fatalf("error = %q, want the 413 diagnosis with the /clear hint", errEvent.Text)
+	}
+}
+
+func TestPromptCharsCountsContentParts(t *testing.T) {
+	ag := &Agent{systemPrompt: "123456"}
+	ag.messages = []llm.Message{{
+		Role: "user",
+		ContentParts: []llm.ContentPart{
+			{Type: "text", Text: "hello"},
+			{Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,AAAA"}},
+		},
+	}}
+	want := 6 + len("user") + len("hello") + len("data:image/png;base64,AAAA")
+	if got := ag.promptChars(); got != want {
+		t.Fatalf("promptChars = %d, want %d including content parts", got, want)
+	}
+}
+
+func TestPayloadTooLargeTruncatesTailToolResult(t *testing.T) {
+	var calls []chatCall
+	gw := payloadTooLargeGateway(t, 1,
+		contentChunks("dense summary of earlier work", 5, 2),
+		contentChunks("final answer", 30, 3),
+		&calls,
+	)
+	jevSrv := mockJev(t, "glm-5.3", 0.9)
+	ag := newTestAgent(t, gw.URL, jevSrv.URL, nil, false)
+	ag.messages = []llm.Message{
+		{Role: "user", Content: "old question"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Type: "function", Function: llm.FuncCall{Name: "bash", Arguments: `{"command":"ls"}`}}}},
+		{Role: "tool", Content: strings.Repeat("x", 200000), ToolCallID: "call_1"},
+		{Role: "assistant", Content: "old answer"},
+	}
+
+	ag.Run("new question")
+	events := collectEvents(t, ag)
+
+	if len(calls) != 3 {
+		t.Fatalf("gateway calls = %d, want 3 (rejected main, summary, retried main): %+v", len(calls), calls)
+	}
+	retry := calls[2]
+	var toolMsg *llm.Message
+	for i, m := range retry.Messages {
+		if m.Role == "tool" {
+			toolMsg = &retry.Messages[i]
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("retry payload has no tool message")
+	}
+	want := strings.Repeat("x", toolResultTruncateChars) + "… (truncated)"
+	if toolMsg.Content != want {
+		t.Fatalf("tail tool result = %d bytes, want truncated to %d bytes", len(toolMsg.Content), len(want))
+	}
+
+	var sawDone bool
+	for _, e := range events {
+		switch e.Kind {
+		case EventTurnDone:
+			sawDone = true
+		case EventError:
+			t.Fatalf("unexpected error event: %s", e.Text)
+		}
+	}
+	if !sawDone {
+		t.Fatal("no turn_done event — session did not recover from tail-bloat 413")
+	}
+}
+
+func TestShrinkPayloadTruncatesTailToolResults(t *testing.T) {
+	ag := &Agent{}
+	ag.messages = []llm.Message{
+		{Role: "user", Content: "q"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Type: "function", Function: llm.FuncCall{Name: "bash", Arguments: "{}"}}}},
+		{Role: "tool", Content: strings.Repeat("x", 100000), ToolCallID: "call_1"},
+	}
+	if !ag.shrinkPayload(context.Background()) {
+		t.Fatal("shrinkPayload = false, want true with an oversized tail tool result")
+	}
+	want := strings.Repeat("x", toolResultTruncateChars) + "… (truncated)"
+	if got := ag.messages[2].Content; got != want {
+		t.Fatalf("tail tool result = %d bytes, want truncated to %d bytes", len(got), len(want))
+	}
+}
+
+func TestShrinkPayloadTruncatesTailToolCallArgs(t *testing.T) {
+	ag := &Agent{}
+	ag.messages = []llm.Message{
+		{Role: "user", Content: "write a big file"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Type: "function", Function: llm.FuncCall{Name: "edit", Arguments: `{"path":"a.go","new_string":"` + strings.Repeat("x", 100000) + `"}`}}}},
+		{Role: "tool", Content: "ok", ToolCallID: "call_1"},
+	}
+	orig := ag.messages[1].ToolCalls[0].Function.Arguments
+	if !ag.shrinkPayload(context.Background()) {
+		t.Fatal("shrinkPayload = false, want true with oversized tail tool call arguments")
+	}
+	want := orig[:toolArgsTruncateChars] + "… (truncated)"
+	if got := ag.messages[1].ToolCalls[0].Function.Arguments; got != want {
+		t.Fatalf("tool call args = %d bytes, want truncated to %d bytes", len(got), len(want))
+	}
+}
+
+func TestShrinkPayloadStopsWhenNothingShrinks(t *testing.T) {
+	ag := &Agent{}
+	ag.messages = []llm.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	}
+	if ag.shrinkPayload(context.Background()) {
+		t.Fatal("shrinkPayload = true, want false with nothing left to shrink")
+	}
+}
+
+func TestCompactSkipsLoneSummary(t *testing.T) {
+	var calls []chatCall
+	gw := compactionGateway(t,
+		[]string{"deepseek-v4.1-flash", "glm-5.2", "glm-5.3"},
+		nil,
+		contentChunks("answer", 1, 1),
+		&calls,
+	)
+	ag := newCompactionAgent(t, gw.URL, "", nil)
+	ag.messages = []llm.Message{
+		{Role: "system", Content: "dense summary of earlier work"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "q3"},
+	}
+
+	if err := ag.compact(context.Background()); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("gateway calls = %d, want 0 (a lone summary must not be re-summarized)", len(calls))
+	}
+}
+
 func TestNeedsCompactionThreshold(t *testing.T) {
 	ag := &Agent{}
 	ag.messages = []llm.Message{{Role: "user", Content: strings.Repeat("x", 5596)}}

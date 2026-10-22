@@ -584,6 +584,25 @@ func TestIsModelUnavailable(t *testing.T) {
 	}
 }
 
+func TestIsPayloadTooLarge(t *testing.T) {
+	tooLarge := &statusError{code: http.StatusRequestEntityTooLarge, status: "413 Request Entity Too Large", body: "<html>413</html>"}
+	if !IsPayloadTooLarge(tooLarge) {
+		t.Fatal("413 status error must be detected as payload too large")
+	}
+	if !IsPayloadTooLarge(fmt.Errorf("chat stream failed after 1 attempt (model deepseek-v4.1-flash): %w", tooLarge)) {
+		t.Fatal("wrapped 413 must be detected as payload too large")
+	}
+	if IsPayloadTooLarge(fmt.Errorf("wrap: %w", &statusError{code: http.StatusTooManyRequests, status: "429 Too Many Requests", body: "{}"})) {
+		t.Fatal("429 is rate limited, not payload too large")
+	}
+	if IsPayloadTooLarge(errors.New("boom")) {
+		t.Fatal("generic error is not payload too large")
+	}
+	if IsPayloadTooLarge(nil) {
+		t.Fatal("nil is not payload too large")
+	}
+}
+
 func TestBackoffDuration(t *testing.T) {
 	client := New("https://host", "key", false)
 	client.retryBase = time.Second
