@@ -107,6 +107,20 @@ func typeName(v any) string {
 	return fmt.Sprintf("%T", v)
 }
 
+func TestWireWithLayaLocalEngine(t *testing.T) {
+	cat := fixedTestCatalog(t)
+	primary, fallback, err := WireWith(Options{Engine: EngineLaya, Enabled: true, Laya: laya.NewLocal()}, cat)
+	if err != nil {
+		t.Fatalf("WireWith: %v", err)
+	}
+	if typeName(primary) != "*router.LayaRouter" {
+		t.Fatalf("primary = %s, want *router.LayaRouter", typeName(primary))
+	}
+	if typeName(fallback) != "*router.HeuristicRouter" {
+		t.Fatalf("fallback = %s, want *router.HeuristicRouter", typeName(fallback))
+	}
+}
+
 func TestWireWithLayaFallbackDefault(t *testing.T) {
 	cat := fixedTestCatalog(t)
 	_, fallback, err := WireWith(Options{Engine: EngineLaya, Enabled: true, Laya: &fakeLayaEngine{}}, cat)

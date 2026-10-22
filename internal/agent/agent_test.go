@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -7182,5 +7183,92 @@ func TestSalvagePreservesCallCount(t *testing.T) {
 	wantExcerpt := fmt.Sprintf("partial analysis %d", subagentMaxSteps-1)
 	if !strings.Contains(taskResult.Result, wantExcerpt) {
 		t.Fatalf("task result = %q, want the last text frame %q", taskResult.Result, wantExcerpt)
+	}
+}
+
+func mcpTool(name string, mutating bool) tools.Tool {
+	return tools.Tool{
+		Name:     name,
+		Mutating: mutating,
+		Schema: llm.Tool{
+			Type: "function",
+			Function: llm.Function{
+				Name: name,
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			},
+		},
+		Execute: func(ctx context.Context, args map[string]any) (tools.Result, error) {
+			return tools.Result{Output: "ok"}, nil
+		},
+	}
+}
+
+func registryNames(reg *tools.Registry) []string {
+	defs := reg.Definitions()
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Function.Name
+	}
+	return names
+}
+
+func TestSetMCPTools(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	mcp := []tools.Tool{
+		mcpTool("mcp_read", false),
+		mcpTool("mcp_write", true),
+	}
+	ag.SetMCPTools(mcp)
+	if len(ag.mcpTools) != 2 {
+		t.Fatalf("mcpTools len = %d, want 2", len(ag.mcpTools))
+	}
+	if ag.mcpTools[0].Name != "mcp_read" {
+		t.Errorf("mcpTools[0].Name = %q, want \"mcp_read\"", ag.mcpTools[0].Name)
+	}
+	if ag.mcpTools[1].Name != "mcp_write" {
+		t.Errorf("mcpTools[1].Name = %q, want \"mcp_write\"", ag.mcpTools[1].Name)
+	}
+}
+
+func TestSubagentGetsMCPTools(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.SetMCPTools([]tools.Tool{
+		mcpTool("mcp_search", false),
+		mcpTool("mcp_fetch", false),
+	})
+	sub := ag.newSubagent("subtask", "guidance")
+	names := registryNames(sub.Tools)
+	if !slices.Contains(names, "mcp_search") {
+		t.Errorf("subagent registry missing mcp_search: %v", names)
+	}
+	if !slices.Contains(names, "mcp_fetch") {
+		t.Errorf("subagent registry missing mcp_fetch: %v", names)
+	}
+}
+
+func TestPersonaGetsReadOnlyMCPToolsOnly(t *testing.T) {
+	ag := New(nil, nil, nil, testCatalog(t), tools.NewRegistry(), nil, false)
+	ag.SetMCPTools([]tools.Tool{
+		mcpTool("mcp_read", false),
+		mcpTool("mcp_write", true),
+		mcpTool("mcp_search", false),
+		mcpTool("mcp_delete", true),
+	})
+	reg := ag.personaRegistry()
+	names := registryNames(reg)
+	if !slices.Contains(names, "mcp_read") {
+		t.Errorf("persona registry missing mcp_read: %v", names)
+	}
+	if !slices.Contains(names, "mcp_search") {
+		t.Errorf("persona registry missing mcp_search: %v", names)
+	}
+	if slices.Contains(names, "mcp_write") {
+		t.Errorf("persona registry must not contain mutating mcp_write: %v", names)
+	}
+	if slices.Contains(names, "mcp_delete") {
+		t.Errorf("persona registry must not contain mutating mcp_delete: %v", names)
 	}
 }

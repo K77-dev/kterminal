@@ -20,7 +20,9 @@ import (
 	"kterminal/internal/config"
 	"kterminal/internal/jev"
 	"kterminal/internal/kspec"
+	"kterminal/internal/laya"
 	"kterminal/internal/llm"
+	"kterminal/internal/mcp"
 	"kterminal/internal/procmon"
 	"kterminal/internal/router"
 	"kterminal/internal/rtk"
@@ -81,6 +83,8 @@ func main() {
 		}
 	}
 
+	layaEngine := laya.NewLocal()
+
 	var llmClient *llm.Client
 	if cfg.Ready() {
 		llmClient = llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.SkipTLSVerify)
@@ -97,6 +101,7 @@ func main() {
 		JevAPIKey:  cfg.Typesafe.APIKey,
 		JevEnabled: cfg.Typesafe.JevEnabled(),
 		FixedModel: cfg.Model,
+		Laya:       layaEngine,
 	}, cat)
 	if wireErr != nil {
 		fmt.Fprintln(os.Stderr, "kterminal: router:", wireErr, "— falling back to the fixed model")
@@ -117,6 +122,29 @@ func main() {
 		}
 	}
 
+	var mcpMgr *mcp.Manager
+	var mcpBridgedTools []tools.Tool
+	if cfg.MCP.EnabledVal() && len(cfg.MCP.Servers) > 0 {
+		mcpConfigs := make([]mcp.ServerConfig, len(cfg.MCP.Servers))
+		for i, s := range cfg.MCP.Servers {
+			mcpConfigs[i] = mcp.ServerConfig{
+				Name:     s.Name,
+				Command:  s.Command,
+				Args:     s.Args,
+				Env:      s.Env,
+				Timeout:  s.Timeout,
+				ReadOnly: s.ReadOnly,
+			}
+		}
+		mcpMgr = mcp.NewManager(mcpConfigs)
+		startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := mcpMgr.Start(startCtx); err != nil {
+			fmt.Fprintln(os.Stderr, "kterminal: mcp:", err)
+		}
+		startCancel()
+		mcpBridgedTools = mcp.RegisterTools(reg, mcpMgr)
+	}
+
 	ag := agent.New(llmClient, primary, fallback, cat, reg, sess, *confirm)
 	ag.SetPinned(cfg.Model)
 	ag.Telemetry = store
@@ -131,6 +159,9 @@ func main() {
 	ag.SetSubagentTimeout(cfg.Agent.SubagentTimeoutDuration)
 	if rtkDet != nil && rtkDet.Available() {
 		ag.SetRtkDetector(rtkDet)
+	}
+	if len(mcpBridgedTools) > 0 {
+		ag.SetMCPTools(mcpBridgedTools)
 	}
 	ag.AttachTaskTool()
 	ag.AttachSquadKickoffTool()
@@ -160,7 +191,7 @@ func main() {
 	}
 
 	dark := lipgloss.HasDarkBackground()
-	opts := []tui.Option{tui.WithKspec(kspecStore), tui.WithProcMon(pm)}
+	opts := []tui.Option{tui.WithKspec(kspecStore), tui.WithProcMon(pm), tui.WithLaya(layaEngine)}
 	if len(resumed.Messages) > 0 {
 		opts = append(opts, tui.WithResumed(resumed.Messages))
 	}
@@ -172,10 +203,16 @@ func main() {
 	go func() {
 		<-sigCh
 		pm.KillAll()
+		if mcpMgr != nil {
+			mcpMgr.Stop()
+		}
 		os.Exit(0)
 	}()
 	p := tea.NewProgram(tui.New(ag, cfg, cat, dark, opts...), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
+		if mcpMgr != nil {
+			mcpMgr.Stop()
+		}
 		pm.KillAll()
 		fmt.Fprintln(os.Stderr, "error:", err)
 		sess.Close()
@@ -183,6 +220,9 @@ func main() {
 		os.Exit(1)
 	}
 	pm.KillAll()
+	if mcpMgr != nil {
+		mcpMgr.Stop()
+	}
 	sess.Close()
 }
 
@@ -303,6 +343,9 @@ func runDoctor(cfg *config.Config, cat *catalog.Catalog, store *telemetry.Store,
 	fmt.Print(doctorKspecSection(kspecStore))
 
 	fmt.Println()
+	fmt.Print(doctorMCPLines(cfg))
+
+	fmt.Println()
 	fmt.Print(doctorTelemetryTable(store, cat))
 
 	if !ok {
@@ -357,6 +400,31 @@ func doctorRtkLines(cfg *config.Config) string {
 		fmt.Fprintln(&b, "  rtk binary: found")
 	} else {
 		fmt.Fprintln(&b, "  rtk binary: not found (install with: brew install rtk)")
+	}
+	return b.String()
+}
+
+func doctorMCPLines(cfg *config.Config) string {
+	var b strings.Builder
+	enabled := "no"
+	if cfg.MCP.EnabledVal() {
+		enabled = "yes"
+	}
+	fmt.Fprintf(&b, "  mcp enabled: %s\n", enabled)
+	if !cfg.MCP.EnabledVal() {
+		return b.String()
+	}
+	if len(cfg.MCP.Servers) == 0 {
+		fmt.Fprintln(&b, "  mcp servers: none configured")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "  mcp servers: %d configured\n", len(cfg.MCP.Servers))
+	for _, s := range cfg.MCP.Servers {
+		ro := ""
+		if s.ReadOnly {
+			ro = " (read-only)"
+		}
+		fmt.Fprintf(&b, "    %s: %s %s%s — timeout %s\n", s.Name, s.Command, strings.Join(s.Args, " "), ro, s.Timeout)
 	}
 	return b.String()
 }

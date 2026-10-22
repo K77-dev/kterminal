@@ -32,8 +32,8 @@ func TestLoadSquadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Squad.DefaultMode != "sdd" {
-		t.Errorf("DefaultMode = %q, want \"sdd\"", cfg.Squad.DefaultMode)
+	if cfg.Squad.DefaultMode != "squad" {
+		t.Errorf("DefaultMode = %q, want \"squad\"", cfg.Squad.DefaultMode)
 	}
 	if cfg.Squad.MaxConvocations != 8 {
 		t.Errorf("MaxConvocations = %d, want 8", cfg.Squad.MaxConvocations)
@@ -227,8 +227,8 @@ func TestSaveLoadRoundTripDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Squad.DefaultMode != "sdd" {
-		t.Errorf("DefaultMode = %q, want \"sdd\"", loaded.Squad.DefaultMode)
+	if loaded.Squad.DefaultMode != "squad" {
+		t.Errorf("DefaultMode = %q, want \"squad\"", loaded.Squad.DefaultMode)
 	}
 	if loaded.Squad.MaxConvocations != 8 {
 		t.Errorf("MaxConvocations = %d, want 8", loaded.Squad.MaxConvocations)
@@ -924,14 +924,14 @@ enabled = false
 	}
 }
 
-func TestLoadRouterDefaultsToJev(t *testing.T) {
+func TestLoadRouterDefaultsToLaya(t *testing.T) {
 	writeTestConfig(t, "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Router.Engine != "jev" {
-		t.Fatalf("engine = %q, want jev default", cfg.Router.Engine)
+	if cfg.Router.Engine != "laya" {
+		t.Fatalf("engine = %q, want laya default", cfg.Router.Engine)
 	}
 	if !cfg.Router.RoutingEnabled() {
 		t.Fatal("routing must default to enabled")
@@ -993,14 +993,151 @@ func TestSaveMaterializesRouterSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if !strings.Contains(string(raw), "[router]") || !strings.Contains(string(raw), "engine = \"jev\"") || !strings.Contains(string(raw), "enabled = true") {
+	if !strings.Contains(string(raw), "[router]") || !strings.Contains(string(raw), "engine = \"laya\"") || !strings.Contains(string(raw), "enabled = true") {
 		t.Fatalf("saved config must materialize the router section:\n%s", string(raw))
 	}
 	reloaded, err := Load()
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if reloaded.Router.Engine != "jev" || !reloaded.Router.RoutingEnabled() {
-		t.Fatalf("reloaded router = %+v, want jev enabled", reloaded.Router)
+	if reloaded.Router.Engine != "laya" || !reloaded.Router.RoutingEnabled() {
+		t.Fatalf("reloaded router = %+v, want laya enabled", reloaded.Router)
+	}
+}
+
+func TestConfigMCPDefaults(t *testing.T) {
+	writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCP.EnabledVal() {
+		t.Error("EnabledVal() = false, want true for nil default")
+	}
+	if len(cfg.MCP.Servers) != 0 {
+		t.Errorf("Servers len = %d, want 0", len(cfg.MCP.Servers))
+	}
+}
+
+func TestConfigMCPSaveLoadRoundTrip(t *testing.T) {
+	writeTestConfig(t, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MCP.Servers = []MCPServer{
+		{
+			Name:     "filesystem",
+			Command:  "npx",
+			Args:     []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+			Timeout:  "60s",
+			ReadOnly: true,
+		},
+		{
+			Name:    "fetch",
+			Command: "uvx",
+			Args:    []string{"mcp-server-fetch"},
+			Env:     map[string]string{"API_KEY": "secret"},
+			Timeout: "45s",
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.MCP.EnabledVal() {
+		t.Error("EnabledVal() = false, want true after round-trip")
+	}
+	if len(loaded.MCP.Servers) != 2 {
+		t.Fatalf("Servers len = %d, want 2", len(loaded.MCP.Servers))
+	}
+	fs := loaded.MCP.Servers[0]
+	if fs.Name != "filesystem" {
+		t.Errorf("Servers[0].Name = %q, want \"filesystem\"", fs.Name)
+	}
+	if fs.Command != "npx" {
+		t.Errorf("Servers[0].Command = %q, want \"npx\"", fs.Command)
+	}
+	if len(fs.Args) != 3 || fs.Args[0] != "-y" || fs.Args[1] != "@modelcontextprotocol/server-filesystem" || fs.Args[2] != "/tmp" {
+		t.Errorf("Servers[0].Args = %v, want [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp\"]", fs.Args)
+	}
+	if fs.Timeout != "60s" {
+		t.Errorf("Servers[0].Timeout = %q, want \"60s\"", fs.Timeout)
+	}
+	if !fs.ReadOnly {
+		t.Error("Servers[0].ReadOnly = false, want true")
+	}
+	fetch := loaded.MCP.Servers[1]
+	if fetch.Name != "fetch" {
+		t.Errorf("Servers[1].Name = %q, want \"fetch\"", fetch.Name)
+	}
+	if fetch.Command != "uvx" {
+		t.Errorf("Servers[1].Command = %q, want \"uvx\"", fetch.Command)
+	}
+	if len(fetch.Args) != 1 || fetch.Args[0] != "mcp-server-fetch" {
+		t.Errorf("Servers[1].Args = %v, want [\"mcp-server-fetch\"]", fetch.Args)
+	}
+	if fetch.Timeout != "45s" {
+		t.Errorf("Servers[1].Timeout = %q, want \"45s\"", fetch.Timeout)
+	}
+	if fetch.ReadOnly {
+		t.Error("Servers[1].ReadOnly = true, want false")
+	}
+	if fetch.Env["API_KEY"] != "secret" {
+		t.Errorf("Servers[1].Env[API_KEY] = %q, want \"secret\"", fetch.Env["API_KEY"])
+	}
+}
+
+func TestConfigMCPDuplicateNames(t *testing.T) {
+	writeTestConfig(t, `
+[[mcp.servers]]
+name = "alpha"
+command = "cmd1"
+
+[[mcp.servers]]
+name = "alpha"
+command = "cmd2"
+`)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for duplicate server names, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error %q missing \"duplicate\"", err)
+	}
+}
+
+func TestConfigMCPEmptyName(t *testing.T) {
+	writeTestConfig(t, `
+[[mcp.servers]]
+command = "cmd1"
+`)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for empty server name, got nil")
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Errorf("error %q missing \"name\"", err)
+	}
+}
+
+func TestConfigMCPDefaultTimeout(t *testing.T) {
+	writeTestConfig(t, `
+[[mcp.servers]]
+name = "myserver"
+command = "cmd"
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.MCP.Servers) != 1 {
+		t.Fatalf("Servers len = %d, want 1", len(cfg.MCP.Servers))
+	}
+	if cfg.MCP.Servers[0].Timeout != "30s" {
+		t.Errorf("Timeout = %q, want \"30s\"", cfg.MCP.Servers[0].Timeout)
 	}
 }

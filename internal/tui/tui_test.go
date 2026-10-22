@@ -261,7 +261,7 @@ func TestLiveBlockAccumulatesAndReplaces(t *testing.T) {
 		t.Fatalf("live block not discarded on tool result: lines=%v omitted=%d", m.liveLines, m.liveOmitted)
 	}
 	plain = stripANSI(m.vp.View())
-	if !strings.Contains(plain, "↳ consolidated ⏎ result") {
+	if !strings.Contains(plain, "↳ consolidated") || !strings.Contains(plain, "result") {
 		t.Fatalf("content missing consolidated result:\n%s", plain)
 	}
 	for _, gone := range []string{"out 05", "out 19", "… +8 lines"} {
@@ -1502,7 +1502,7 @@ func TestResumedRendersAssistantToolCalls(t *testing.T) {
 	if !strings.Contains(plain, `▶ bash({"command":"ls"})`) {
 		t.Fatalf("resumed content missing tool call line:\n%s", plain)
 	}
-	if !strings.Contains(plain, "file1 ⏎ file2") {
+	if !strings.Contains(plain, "file1") || !strings.Contains(plain, "file2") {
 		t.Fatalf("resumed content missing tool result line:\n%s", plain)
 	}
 	if n := strings.Count(plain, "◇"); n != 1 {

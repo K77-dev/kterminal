@@ -150,6 +150,7 @@ type Agent struct {
 	mesa              *squad.Mesa
 	modelHealth       *modelHealth
 	rtkDetector       *rtk.Detector
+	mcpTools          []tools.Tool
 }
 
 func New(llmClient *llm.Client, r router.Router, fallback router.Router, cat *catalog.Catalog, reg *tools.Registry, sess *session.Writer, confirm bool) *Agent {
@@ -186,6 +187,10 @@ func (a *Agent) SetRouters(r router.Router, fallback router.Router) {
 func (a *Agent) SetSubagentTimeout(d time.Duration) { a.subagentTimeout = d }
 
 func (a *Agent) SetRtkDetector(det *rtk.Detector) { a.rtkDetector = det }
+
+func (a *Agent) SetMCPTools(tools []tools.Tool) {
+	a.mcpTools = tools
+}
 
 // AttachProject binds the project directory for context and rules filtering.
 func (a *Agent) AttachProject(dir string) {
@@ -713,6 +718,9 @@ func (a *Agent) newSubagent(description, guidance string) *Agent {
 	if a.rtkDetector != nil {
 		sub.Tools.SetRtkDetector(a.rtkDetector)
 	}
+	for _, t := range a.mcpTools {
+		sub.Tools.Register(t)
+	}
 	sub.messages = []llm.Message{
 		{Role: "system", Content: a.subagentSystemPromptWithProject()},
 		{Role: "user", Content: content},
@@ -823,6 +831,11 @@ func (a *Agent) personaPin(name string) string {
 func (a *Agent) personaRegistry() *tools.Registry {
 	reg := tools.NewReadOnlyRegistry()
 	reg.SetOnGoEdit(a.Tools.OnGoEdit)
+	for _, t := range a.mcpTools {
+		if !t.Mutating {
+			reg.Register(t)
+		}
+	}
 	return reg
 }
 

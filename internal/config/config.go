@@ -74,6 +74,27 @@ func (r RTK) EnabledVal() bool {
 	return *r.Enabled
 }
 
+type MCPServer struct {
+	Name     string            `toml:"name"`
+	Command  string            `toml:"command"`
+	Args     []string          `toml:"args"`
+	Env      map[string]string `toml:"env"`
+	Timeout  string            `toml:"timeout"`
+	ReadOnly bool              `toml:"read_only"`
+}
+
+type MCP struct {
+	Enabled *bool       `toml:"enabled"`
+	Servers []MCPServer `toml:"servers"`
+}
+
+func (m MCP) EnabledVal() bool {
+	if m.Enabled == nil {
+		return true
+	}
+	return *m.Enabled
+}
+
 type Config struct {
 	Model    string   `toml:"model"`
 	LLM      LLM      `toml:"llm"`
@@ -82,10 +103,11 @@ type Config struct {
 	Squad    Squad    `toml:"squad"`
 	Agent    Agent    `toml:"agent"`
 	RTK      RTK      `toml:"rtk"`
+	MCP      MCP      `toml:"mcp"`
 }
 
 const (
-	defaultMode            = "sdd"
+	defaultMode            = "squad"
 	defaultMaxConvocations = 8
 	defaultTokenBudget     = int64(200000)
 
@@ -191,6 +213,13 @@ func Load() (*Config, error) {
 		}
 		cfg.RTK.Enabled = &enabled
 	}
+	if v := os.Getenv("KTERMINAL_MCP_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mcp.enabled %q: %w", v, err)
+		}
+		cfg.MCP.Enabled = &enabled
+	}
 	if cfg.Squad.DefaultMode == "" {
 		cfg.Squad.DefaultMode = defaultMode
 	}
@@ -221,6 +250,25 @@ func Load() (*Config, error) {
 	if cfg.Agent.SubagentTimeout == "" {
 		cfg.Agent.SubagentTimeout = defaultSubagentTimeout
 	}
+	for i := range cfg.MCP.Servers {
+		s := &cfg.MCP.Servers[i]
+		if s.Timeout == "" {
+			s.Timeout = "30s"
+		}
+		if _, err := time.ParseDuration(s.Timeout); err != nil {
+			return nil, fmt.Errorf("invalid mcp.servers[%d].timeout %q: %w", i, s.Timeout, err)
+		}
+	}
+	seen := map[string]bool{}
+	for i, s := range cfg.MCP.Servers {
+		if s.Name == "" {
+			return nil, fmt.Errorf("mcp.servers[%d]: name is required", i)
+		}
+		if seen[s.Name] {
+			return nil, fmt.Errorf("mcp.servers[%d]: duplicate server name %q", i, s.Name)
+		}
+		seen[s.Name] = true
+	}
 	var err error
 	if cfg.LLM.RequestTimeoutDuration, err = parseDurationField("llm.request_timeout", cfg.LLM.RequestTimeout); err != nil {
 		return nil, err
@@ -247,7 +295,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid router.engine %q: must be \"jev\" or \"laya\"", cfg.Router.Engine)
 	}
 	if cfg.Router.Engine == "" {
-		cfg.Router.Engine = "jev"
+		cfg.Router.Engine = "laya"
 	}
 	return cfg, nil
 }
@@ -265,8 +313,12 @@ func (c *Config) Save() error {
 		enabled := true
 		c.RTK.Enabled = &enabled
 	}
+	if c.MCP.Enabled == nil {
+		enabled := true
+		c.MCP.Enabled = &enabled
+	}
 	if c.Router.Engine == "" {
-		c.Router.Engine = "jev"
+		c.Router.Engine = "laya"
 	}
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err

@@ -257,7 +257,7 @@ func resumedMessageBlocks(msg llm.Message, width int, dark bool) []string {
 		}
 		return blocks
 	case "tool":
-		return []string{indentLines(resultStyle.Render("↳ "+truncate(strings.ReplaceAll(msg.Content, "\n", " ⏎ "), 160)), statusIndent)}
+		return []string{renderToolResult(msg.Content, "", statusIndent)}
 	}
 	return nil
 }
@@ -502,8 +502,8 @@ func (m Model) handleAgentEvent(e agent.Event) (tea.Model, tea.Cmd) {
 		m.refreshContent()
 	case agent.EventToolResult:
 		m.resetLiveBlock()
-		line := indentLines(resultStyle.Render("↳ "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent)
-		m.blocks = append(m.blocks, line)
+		block := renderToolResult(e.Result, e.Tool, statusIndent)
+		m.blocks = append(m.blocks, block)
 		if block := renderDiffBlock(e.Diff); block != "" {
 			m.blocks = append(m.blocks, block)
 		}
@@ -578,7 +578,8 @@ func (m *Model) handleNestedEvent(e agent.Event) {
 			m.personaActivity[e.Agent] = fmt.Sprintf("%s(%s)", e.Tool, firstLine(e.Args, 100))
 		}
 	case agent.EventToolResult:
-		m.blocks = append(m.blocks, indentLines(nestedStyle.Render(nestedPrefix(e.Depth)+"  ↳ "+truncate(strings.ReplaceAll(e.Result, "\n", " ⏎ "), 160)), statusIndent))
+		block := renderNestedToolResult(e.Result, e.Depth, statusIndent)
+		m.blocks = append(m.blocks, block)
 	case agent.EventConfirm:
 		ev := e
 		m.pendingConfirm = &ev
@@ -657,6 +658,78 @@ func formatTokensK(n int64) string {
 		return strconv.FormatInt(n, 10)
 	}
 	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+const maxToolResultLines = 40
+const toolResultEdgeLines = 20
+
+func renderToolResult(result string, tool string, indent int) string {
+	if result == "" {
+		return indentLines(resultStyle.Render("↳ (empty)"), indent)
+	}
+	lines := strings.Split(result, "\n")
+	if len(lines) <= maxToolResultLines {
+		return indentLines(resultStyle.Render("↳ "+result), indent)
+	}
+	// Truncate the middle
+	var b strings.Builder
+	for _, line := range lines[:toolResultEdgeLines] {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	omitted := len(lines) - maxToolResultLines
+	b.WriteString(fmt.Sprintf("… +%d more lines …", omitted))
+	b.WriteString("\n")
+	tail := lines[len(lines)-toolResultEdgeLines:]
+	for i, line := range tail {
+		b.WriteString(line)
+		if i < len(tail)-1 {
+			b.WriteString("\n")
+		}
+	}
+	return indentLines(resultStyle.Render("↳ "+b.String()), indent)
+}
+
+func renderNestedToolResult(result string, depth int, indent int) string {
+	if result == "" {
+		return indentLines(nestedStyle.Render(nestedPrefix(depth)+"  ↳ (empty)"), indent)
+	}
+	lines := strings.Split(result, "\n")
+	prefix := nestedPrefix(depth)
+	var b strings.Builder
+	maxLines := maxToolResultLines
+	if len(lines) <= maxLines {
+		for i, line := range lines {
+			if i == 0 {
+				b.WriteString(nestedStyle.Render(prefix + "  ↳ " + line))
+			} else {
+				b.WriteString(nestedStyle.Render(prefix + "    " + line))
+			}
+			if i < len(lines)-1 {
+				b.WriteString("\n")
+			}
+		}
+		return indentLines(b.String(), indent)
+	}
+	// Truncate the middle
+	for i, line := range lines[:toolResultEdgeLines] {
+		if i == 0 {
+			b.WriteString(nestedStyle.Render(prefix + "  ↳ " + line))
+		} else {
+			b.WriteString(nestedStyle.Render(prefix + "    " + line))
+		}
+		b.WriteString("\n")
+	}
+	omitted := len(lines) - maxLines
+	b.WriteString(nestedStyle.Render(prefix + "    … +" + fmt.Sprint(omitted) + " more lines …"))
+	b.WriteString("\n")
+	for i, line := range lines[len(lines)-toolResultEdgeLines:] {
+		b.WriteString(nestedStyle.Render(prefix + "    " + line))
+		if i < toolResultEdgeLines-1 {
+			b.WriteString("\n")
+		}
+	}
+	return indentLines(b.String(), indent)
 }
 
 func renderDiffBlock(diff []tools.DiffLine) string {

@@ -26,6 +26,7 @@ $ go run .
 - [Roteamento de modelo](#roteamento-de-modelo)
 - [Processos em background](#processos-em-background)
 - [rtk (compressão de output)](#rtk-compressão-de-output)
+- [MCP Servers](#mcp-servers)
 - [Sob o capô](#sob-o-capô)
 - [Comandos](#comandos)
 - [Solução de problemas](#solução-de-problemas)
@@ -354,6 +355,50 @@ Instalação: `brew install rtk` (ou ver https://github.com/rtk-ai/rtk).
 
 ---
 
+## MCP Servers
+
+O kterminal suporta **MCP (Model Context Protocol)** servers via stdio. Servidores externos expõem tools que o agente pode invocar como qualquer outra tool do registry. Qualquer servidor MCP compatível funciona.
+
+```toml
+# ~/.config/kterminal/config.toml
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+timeout = "30s"
+
+[[mcp.servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "ghp_..." }
+read_only = true
+timeout = "45s"
+```
+
+| Campo | Descrição | Default |
+|---|---|---|
+| `name` | Identificador único do servidor (obrigatório) | — |
+| `command` | Executável do servidor | — |
+| `args` | Argumentos do comando | `[]` |
+| `env` | Variáveis de ambiente | `{}` |
+| `timeout` | Timeout por chamada | `"30s"` |
+| `read_only` | Tools não-mutating (disponível em plan mode e personas) | `false` |
+
+Comportamentos-chave:
+
+- **Namespacing**: tools são registradas como `mcp__<server>__<tool>` para evitar colisão com tools built-in.
+- **Permissões**: por default, MCP tools são tratadas como mutating — disparam confirmation prompts em `--confirm` e são bloqueadas em plan mode. `read_only = true` marca todas as tools do servidor como non-mutating — ficam disponíveis em plan mode e são injetadas em personas do squad.
+- **Startup paralelo**: todos os servidores spawnam no boot. Falha = skip com warning; o agente funciona sem essas tools.
+- **Shutdown graceful**: SIGTERM → 5s timeout → SIGKILL no process group inteiro.
+- **Env override**: `KTERMINAL_MCP_ENABLED=false` desabilita todos os servidores.
+- `kterminal --doctor` mostra o estado de cada servidor configurado.
+
+---
+
 ## Sob o capô
 
 <details>
@@ -390,6 +435,7 @@ Instalação: `brew install rtk` (ou ver https://github.com/rtk-ai/rtk).
 | `internal/procmon/` | Manager de processos background: spawn em grupo próprio, watcher, `Stop` TERM→KILL, `KillAll` idempotente |
 | `internal/tools/bash.go` | Tool `bash` com `run_in_background` e rewrite via rtk |
 | `internal/rtk/rtk.go` | Detector do binário rtk (cache thread-safe) e `Rewrite` (best-effort, skip metacaracteres) |
+| `internal/mcp/` | Cliente MCP (JSON-RPC sobre stdio), Manager, bridge para tools.Registry |
 | `internal/tui/commands.go` | Comandos `/router`, `/model`, `/bg`, `/rtk`, popups, toggle plan/build (`tab`/`alt+tab`) |
 | `internal/tools/graphify.go` | Tool read-only de consulta ao knowledge graph (`graphify-out/graph.json`) |
 
@@ -433,6 +479,8 @@ A mesa não vive fora do processo do repo: personas leem artefatos de `spec/` co
 | `/config` | Abre a configuração (gateway, keys, engine, modelo) |
 | `/help` | Lista de comandos |
 | `/clear`, `/image`, `/unimage`, `/exit` | Sessão e anexos |
+
+`--doctor` executa checagens de setup (config, gateway, engine, catálogo, telemetria, **MCP servers**).
 
 ## Plan × Build
 

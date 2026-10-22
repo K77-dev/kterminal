@@ -1123,6 +1123,7 @@ func newModelCommandModel(t *testing.T) (Model, *agent.Agent) {
 		t.Fatalf("catalog: %v", err)
 	}
 	cfg := &config.Config{}
+	cfg.Router.Engine = "jev"
 	cfg.LLM.BaseURL = "http://localhost:4000"
 	cfg.LLM.APIKey = "gw-key"
 	ag := agent.New(nil, nil, nil, cat, tools.NewRegistry(), nil, false)
@@ -1438,6 +1439,7 @@ func newJevCommandModel(t *testing.T, gwURL, jevURL, jevKey string) (Model, *age
 		t.Fatalf("catalog: %v", err)
 	}
 	cfg := &config.Config{}
+	cfg.Router.Engine = "jev"
 	cfg.LLM.BaseURL = gwURL
 	cfg.LLM.APIKey = "gw-key"
 	cfg.Typesafe.APIKey = jevKey
@@ -1743,6 +1745,7 @@ func newConfigScreenModel(t *testing.T) (Model, *agent.Agent) {
 		t.Fatalf("catalog: %v", err)
 	}
 	cfg := &config.Config{}
+	cfg.Router.Engine = "jev"
 	cfg.LLM.BaseURL = "http://localhost:4000"
 	cfg.LLM.APIKey = "gw-key"
 	cfg.Typesafe.APIKey = "jev-key"
@@ -1878,6 +1881,7 @@ func TestConfigSaveMaterializesLegacyFields(t *testing.T) {
 	if cfg.Typesafe.Enabled != nil || cfg.Model != "" {
 		t.Fatalf("legacy config must load without the new fields: %+v", cfg)
 	}
+	cfg.Router.Engine = "jev"
 	cat, err := catalog.Load()
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
